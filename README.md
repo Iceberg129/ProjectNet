@@ -1,6 +1,10 @@
 # LoRa AODV-Lite 多跳通信系统
 
+> **第 21 队** · 黄鹏峻 · 吴汉鹏 · 林金鑫 · 贾笛
+
 基于 Arduino Uno + LoRa SX1278 的轻量按需距离矢量路由（AODV-Lite）多跳通信实验系统，配套 FastAPI + WebSocket + ECharts 实时可视化监控界面。
+
+**GitHub 仓库**：[https://github.com/050415/ProjectNet](https://github.com/050415/ProjectNet)
 
 ---
 
@@ -51,7 +55,8 @@ sender(0x30) ──→ relay(0x22) ──→ relay(0x21) ──→ mainTerm  双
 | relay | `0x21`, `0x22`, … | `relayTerm/relayTerm.ino` | 中继节点，RSSI 盖章 + 非阻塞转发 |
 | mainTerm | `0x10` | `mainTerm/mainTerm.ino` | 目的终端，RREQ 收集 + 瓶颈 RSSI 裁决 + 串口桥接 PC |
 
-> **烧录 relay 时**：修改 `MY_NODE_ID` 以区分不同中继节点（如 `0x21`、`0x22`）。
+> **烧录 relay 时**：修改 `MY_NODE_ID` 以区分不同中继节点（如 `0x21`、`0x22`）。  
+> **SPI 引脚**：relay 固件使用 `LoRa.setPins(A3)` 指定 NSS 引脚（部分 Arduino 板需要）；sender 和 mainTerm 使用默认 SPI 引脚（`setPins` 已注释）。
 
 ---
 
@@ -282,6 +287,7 @@ FRAME_FORMAT = '<2sBBBBB8sB'   # 16 字节
 | `/api/node/{id}` | GET | 获取指定节点详情 |
 | `/api/links` | GET | 获取链路 RSSI 数据及历史 |
 | `/api/simulate` | GET | 运行 8 轮模拟通信（含 RSSI 漂移） |
+| `/api/stop_simulate` | GET | 停止正在运行的模拟 |
 
 ### WebSocket 消息类型
 
@@ -291,11 +297,11 @@ FRAME_FORMAT = '<2sBBBBB8sB'   # 16 字节
 | `frame` | server→client | 解析后的 LoRa 帧（含 stamps/relays/lastHopRssi） |
 | `sys` | server→client | 系统消息（串口连接/断开） |
 | `sys_error` | server→client | 系统错误 |
-| `text_log` | server→client | 串口文本行（调试日志） |
+| `text_log` | server→client | 串口文本行（仅转发含关键字的行：TOPO/STATS/ROUTE/RSSI 等，过滤噪音） |
 | `open_serial` | client→server | 打开指定串口 |
 | `close_serial` | client→server | 关闭串口 |
 | `reset_stats` | client→server | 重置统计 |
-| `send_command` | client→server | 向 mainTerm 发送命令 |
+| `send_command` | client→server | 向 mainTerm 发送命令（如信道配置 `CFG:0x21:F530:S7:P17`） |
 
 ---
 
@@ -311,7 +317,7 @@ FRAME_FORMAT = '<2sBBBBB8sB'   # 16 字节
 ┌──────────────────────────────────────────────────────────┐
 │  HEADER: 标题 + 串口选择 + 波特率 + 模拟/演示/信道按钮     │
 ├──────────────────────────────────────────────────────────┤
-│  STATS BAR: 总帧数 | RREQ | RREP | DATA | ACK | 成功率  │
+│  STATS BAR: 总帧数 | RREQ | RREP | DATA | ACK | 平均RSSI  │
 ├────────────────────────────────┬─────────────────────────┤
 │                                │  Tab: 📜日志 🔍节点 📶链路│
 │   ECharts 拓扑图               │  ┌─────────────────────┐ │
@@ -488,9 +494,10 @@ RREP sent → 0x30  pathId=3  relays=1 (RELAYED)
 | relay #2 | `relayTerm/relayTerm.ino` | `MY_NODE_ID = 0x22` |
 | mainTerm | `mainTerm/mainTerm.ino` | 无需修改 |
 
-### 2. 启动 Python 服务
+### 2. 安装 Python 依赖并启动服务
 
 ```bash
+pip install fastapi uvicorn pyserial
 cd UI/UI
 py -3.12 main.py
 ```
@@ -517,7 +524,7 @@ py -3.12 main.py
 |---|---|---|
 | 网页不更新 | Arduino 未烧录最新固件 | 重新烧录 mainTerm（含 Serial.write 改动） |
 | 串口输出乱码 | 二进制帧被串口监视器当文本解析 | 关闭 Arduino IDE 串口监视器 |
-| COM 口 Code 31 | Windows COM Name Arbiter 冲突 | 管理员运行 `fix_com6.ps1`（清理注册表） |
+| COM 口 Code 31 | Windows COM Name Arbiter 冲突 | 管理员 PowerShell 清理注册表 `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\COM Name Arbiter` |
 | Port 8000 被占用 | 残留 Python 进程 | `Get-NetTCPConnection -LocalPort 8000 \| Stop-Process` |
 | RSSI 显示"未知" | 链路未收到 RREQ 印章或末跳 RSSI | 检查 relay 是否正常工作（看串口 `[ HEAR]` 日志） |
 | RSSI 显示"0 dBm" | RREP/ACK 的 data[7]=0 覆盖了正确值 | 已修复：Python 仅对 RREQ/DATA 提取 lastHopRssi |
@@ -529,17 +536,20 @@ py -3.12 main.py
 ## 文件清单
 
 ```
-Project_v2/
+Project_v3/
 ├── README.md                    ← 本文件
+├── .gitignore                   ← Git 忽略规则
+├── .claude/                     ← Claude Code 配置
+├── UI.zip                       ← UI 分发包
 ├── Project/
 │   ├── sender/
 │   │   └── sender.ino           ← 发送终端固件（0x30）
 │   ├── relayTerm/
 │   │   └── relayTerm.ino        ← 中继节点固件（0x21 / 0x22）
 │   └── mainTerm/
-│       └── mainTerm.ino         ← 目的终端固件（0x10）+ PC 桥接
+│       └── mainTerm.ino         ← 目的终端固件（0x10）+ PC 串口桥接
 └── UI/
     └── UI/
-        ├── main.py              ← FastAPI 后端（串口解析 + WebSocket）
-        └── index.html           ← Web 前端（ECharts 拓扑 + RSSI 趋势）
+        ├── main.py              ← FastAPI 后端（串口解析 + WebSocket + 模拟）
+        └── index.html           ← Web 前端（ECharts 拓扑 + RSSI 趋势 + 日志/节点/链路面板）
 ```
