@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where python *)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\); print\\(sys.path\\)\")",
+      "Bash(C:\\\\An\\\\envs\\\\chuxue\\\\Scripts\\\\pip.exe install *)",
+      "Read(//c/An/envs/chuxue/Scripts/**)",
+      "Read(//c/An/envs/chuxue/**)",
+      "Read(//c/Users/吴汉鹏/AppData/Local/hermes/hermes-agent/venv/Scripts/**)",
+      "Bash(start http://127.0.0.1:8000/)",
+      "Bash(taskkill //PID 21544 //F)",
+      "Bash(/c/An/envs/chuxue/python.exe main.py)"
+    ]
+  }
+}

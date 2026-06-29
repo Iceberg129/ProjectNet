@@ -116,8 +116,12 @@ class StatsTracker:
         self.bad += 1
 
     @property
-    def success_rate(self):
-        return round(self.ack / self.rreq * 100, 1) if self.rreq > 0 else 0.0
+    def average_rssi(self):
+        """所有链路当前 RSSI 的平均值"""
+        if not self.link_rssi:
+            return None
+        vals = list(self.link_rssi.values())
+        return round(sum(vals) / len(vals), 1)
 
     def get_rssi_history(self, link_key: str = None):
         """返回 RSSI 历史数据，用于前端折线图"""
@@ -153,7 +157,7 @@ class StatsTracker:
             "dataCount":   self.data,
             "ackCount":    self.ack,
             "badFrames":   self.bad,
-            "successRate": self.success_rate,
+            "avgRssi":     self.average_rssi,
             "nodesSeen":   len(self.nodes_seen),
             "currentRoute": self.current_route,
             "currentPhase": self.current_phase,
@@ -222,6 +226,22 @@ def get_links():
 serial_port_obj = None
 serial_is_running = False
 
+# 串口文本日志关键字过滤 — 只保留有用信息，丢弃无用噪音
+_TEXT_LOG_KEYWORDS = [
+    "TOPO", "STATS", "ROUTE", "RSSI", "JOIN", "ERR", "WARN",
+    "FAIL", "ERROR", "NET", "CFG", "NODE", "LINK", "PATH",
+    "SEND", "RECV", "ACK", "DATA", "RREQ", "RREP",
+]
+
+
+def _is_useful_log(line: str) -> bool:
+    """判断串口文本行是否包含有用信息"""
+    upper = line.upper()
+    for kw in _TEXT_LOG_KEYWORDS:
+        if kw in upper:
+            return True
+    return False
+
 def read_serial_thread(port_name: str, baudrate: int, loop):
     global serial_port_obj, serial_is_running
     try:
@@ -239,7 +259,7 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                     if b == 0x0A:  # \n
                         try:
                             line = text_buf.decode('utf-8', errors='replace').strip()
-                            if line:
+                            if line and _is_useful_log(line):
                                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
                                     "type":"text_log","text":line,"time":time.time()
                                 })), loop)
@@ -323,134 +343,170 @@ async def ws_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ════════════════════ 模拟测试（增强版：RSSI 随时间变化） ════════════════════
+simulate_stop_event = asyncio.Event()     # 取消信号
+simulate_lock = asyncio.Lock()            # 防止并发模拟
+
+async def _check_cancel():
+    """检查是否被取消，若取消则抛出异常中断模拟"""
+    if simulate_stop_event.is_set():
+        raise asyncio.CancelledError("模拟已取消")
+
+@app.get("/api/stop_simulate")
+async def stop_simulate():
+    """停止正在运行的模拟"""
+    simulate_stop_event.set()
+    return {"status":"ok","msg":"已发送停止信号"}
+
 @app.get("/api/simulate")
 async def simulate_traffic():
-    loop = asyncio.get_running_loop()
+    # 防止并发模拟
+    if simulate_lock.locked():
+        return {"status":"busy","msg":"模拟正在运行中，请先停止"}
+    async with simulate_lock:
+        simulate_stop_event.clear()  # 重置取消信号
+        loop = asyncio.get_running_loop()
 
-    def bcast(obj):
-        obj.setdefault("stats", stats.to_dict())
-        asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(obj)), loop)
+        def bcast(obj):
+            obj.setdefault("stats", stats.to_dict())
+            asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(obj)), loop)
 
-    def rec(src, dest, mtype, pid, cnt, stamps, relays):
-        stats.record_frame(src, dest, mtype, pid, cnt, stamps, relays)
+        def rec(src, dest, mtype, pid, cnt, stamps, relays):
+            stats.record_frame(src, dest, mtype, pid, cnt, stamps, relays)
 
-    def stamps_hex(stamps):
-        h = ""
-        for s in stamps:
-            h += f"{int(s['id'],16):02X}{u8h(s['rssi'])}"
-        return h.ljust(16, '0')
+        def stamps_hex(stamps):
+            h = ""
+            for s in stamps:
+                h += f"{int(s['id'],16):02X}{u8h(s['rssi'])}"
+            return h.ljust(16, '0')
 
-    # ── 第一阶段：节点入网 ──
-    for node_id, role, role_name in [(0x21,1,"relay21"),(0x22,1,"relay22"),(0x30,2,"sender")]:
-        rec(node_id, 0x10, MSG_JOIN_REQ, 0, 0, [], [])
-        bcast({"type":"frame","src":node_id,"dest":0x10,"msgType":MSG_JOIN_REQ,"msgTypeName":"JOIN",
-               "pathId":0,"count":0,"rssiStamps":[],"relays":[],
-               "dataHex":f"0{role}00000000000000","checksum":0})
-        await asyncio.sleep(0.08)
-        rec(0x10, node_id, MSG_JOIN_ACK, 0, 0, [], [])
-        bcast({"type":"frame","src":0x10,"dest":node_id,"msgType":MSG_JOIN_ACK,"msgTypeName":"JOIN_OK",
-               "pathId":0,"count":0,"rssiStamps":[],"relays":[],
-               "dataHex":"AC00000000000000","checksum":0})
-        await asyncio.sleep(0.08)
-        # 心跳
-        rec(node_id, 0x10, MSG_HEARTBEAT, 0, 0, [], [])
-        bcast({"type":"frame","src":node_id,"dest":0x10,"msgType":MSG_HEARTBEAT,"msgTypeName":"HB",
-               "pathId":0,"count":0,"rssiStamps":[],"relays":[],
-               "dataHex":f"0{role}00000000000000","checksum":0})
-        await asyncio.sleep(0.05)
-    await asyncio.sleep(0.3)
+        try:
+            # ── 第一阶段：节点入网 ──
+            for node_id, role, role_name in [(0x21,1,"relay21"),(0x22,1,"relay22"),(0x30,2,"sender")]:
+                await _check_cancel()
+                rec(node_id, 0x10, MSG_JOIN_REQ, 0, 0, [], [])
+                bcast({"type":"frame","src":node_id,"dest":0x10,"msgType":MSG_JOIN_REQ,"msgTypeName":"JOIN",
+                       "pathId":0,"count":0,"rssiStamps":[],"relays":[],
+                       "dataHex":f"0{role}00000000000000","checksum":0})
+                await asyncio.sleep(0.08)
+                await _check_cancel()
+                rec(0x10, node_id, MSG_JOIN_ACK, 0, 0, [], [])
+                bcast({"type":"frame","src":0x10,"dest":node_id,"msgType":MSG_JOIN_ACK,"msgTypeName":"JOIN_OK",
+                       "pathId":0,"count":0,"rssiStamps":[],"relays":[],
+                       "dataHex":"AC00000000000000","checksum":0})
+                await asyncio.sleep(0.08)
+                await _check_cancel()
+                # 心跳
+                rec(node_id, 0x10, MSG_HEARTBEAT, 0, 0, [], [])
+                bcast({"type":"frame","src":node_id,"dest":0x10,"msgType":MSG_HEARTBEAT,"msgTypeName":"HB",
+                       "pathId":0,"count":0,"rssiStamps":[],"relays":[],
+                       "dataHex":f"0{role}00000000000000","checksum":0})
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.3)
 
-    # 模拟 RSSI 随时间缓慢变化
-    base_rssi = {"0x21": -48, "0x22": -55}
-    rssi_drift = {"0x21": 0, "0x22": 0}
+            # 模拟 RSSI 随时间缓慢变化
+            base_rssi = {"0x21": -48, "0x22": -55}
+            rssi_drift = {"0x21": 0, "0x22": 0}
 
-    def vary(relay: str) -> int:
-        """让 RSSI 在 ±8 dB 内缓慢漂移"""
-        import random
-        rssi_drift[relay] += random.choice([-2,-1,0,1,2])
-        rssi_drift[relay] = max(-8, min(8, rssi_drift[relay]))
-        return base_rssi[relay] + rssi_drift[relay]
+            def vary(relay: str) -> int:
+                """让 RSSI 在 ±8 dB 内缓慢漂移"""
+                import random
+                rssi_drift[relay] += random.choice([-2,-1,0,1,2])
+                rssi_drift[relay] = max(-8, min(8, rssi_drift[relay]))
+                return base_rssi[relay] + rssi_drift[relay]
 
-    choices = [
-        ([0x21],    "00AB"),
-        ([],        "01AB"),
-        ([0x22],    "02AB"),
-        ([0x21,0x22],"03AB"),
-        ([0x21],    "04AB"),
-        ([0x22],    "05AB"),
-        ([],        "06AB"),
-        ([0x21],    "07AB"),
-    ]
+            choices = [
+                ([0x21],    "00AB"),
+                ([],        "01AB"),
+                ([0x22],    "02AB"),
+                ([0x21,0x22],"03AB"),
+                ([0x21],    "04AB"),
+                ([0x22],    "05AB"),
+                ([],        "06AB"),
+                ([0x21],    "07AB"),
+            ]
 
-    for pid, (chosen, payload) in enumerate(choices, start=1):
-        r21_rssi = vary("0x21")
-        r22_rssi = vary("0x22")
-        r21_stamps = [{"id":"0x21","rssi":r21_rssi}]
-        r22_stamps = [{"id":"0x22","rssi":r22_rssi}]
-        double_stamps = [{"id":"0x21","rssi":r21_rssi},{"id":"0x22","rssi":r22_rssi+3}]
+            for pid, (chosen, payload) in enumerate(choices, start=1):
+                await _check_cancel()
+                r21_rssi = vary("0x21")
+                r22_rssi = vary("0x22")
+                r21_stamps = [{"id":"0x21","rssi":r21_rssi}]
+                r22_stamps = [{"id":"0x22","rssi":r22_rssi}]
+                double_stamps = [{"id":"0x21","rssi":r21_rssi},{"id":"0x22","rssi":r22_rssi+3}]
 
-        # RREQ 直达
-        rec(0x30, 0x10, MSG_RREQ, pid, 0, [], [])
-        bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-               "pathId":pid,"count":0,"rssiStamps":[],"relays":[],
-               "dataHex":"0000000000000000","checksum":0})
-        await asyncio.sleep(0.10)
+                # RREQ 直达
+                rec(0x30, 0x10, MSG_RREQ, pid, 0, [], [])
+                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
+                       "pathId":pid,"count":0,"rssiStamps":[],"relays":[],
+                       "dataHex":"0000000000000000","checksum":0})
+                await asyncio.sleep(0.10)
+                await _check_cancel()
 
-        # RREQ 经 0x21
-        rec(0x30, 0x10, MSG_RREQ, pid, 1, r21_stamps, [])
-        bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-               "pathId":pid,"count":1,"rssiStamps":r21_stamps,"relays":[],
-               "dataHex":stamps_hex(r21_stamps),"checksum":0})
-        await asyncio.sleep(0.10)
+                # RREQ 经 0x21
+                rec(0x30, 0x10, MSG_RREQ, pid, 1, r21_stamps, [])
+                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
+                       "pathId":pid,"count":1,"rssiStamps":r21_stamps,"relays":[],
+                       "dataHex":stamps_hex(r21_stamps),"checksum":0})
+                await asyncio.sleep(0.10)
+                await _check_cancel()
 
-        # RREQ 经 0x22
-        rec(0x30, 0x10, MSG_RREQ, pid, 1, r22_stamps, [])
-        bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-               "pathId":pid,"count":1,"rssiStamps":r22_stamps,"relays":[],
-               "dataHex":stamps_hex(r22_stamps),"checksum":0})
-        await asyncio.sleep(0.10)
+                # RREQ 经 0x22
+                rec(0x30, 0x10, MSG_RREQ, pid, 1, r22_stamps, [])
+                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
+                       "pathId":pid,"count":1,"rssiStamps":r22_stamps,"relays":[],
+                       "dataHex":stamps_hex(r22_stamps),"checksum":0})
+                await asyncio.sleep(0.10)
+                await _check_cancel()
 
-        # RREQ 双跳
-        rec(0x30, 0x10, MSG_RREQ, pid, 2, double_stamps, [])
-        bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-               "pathId":pid,"count":2,"rssiStamps":double_stamps,"relays":[],
-               "dataHex":stamps_hex(double_stamps),"checksum":0})
-        await asyncio.sleep(0.10)
+                # RREQ 双跳
+                rec(0x30, 0x10, MSG_RREQ, pid, 2, double_stamps, [])
+                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
+                       "pathId":pid,"count":2,"rssiStamps":double_stamps,"relays":[],
+                       "dataHex":stamps_hex(double_stamps),"checksum":0})
+                await asyncio.sleep(0.10)
+                await _check_cancel()
 
-        # 裁决窗口
-        await asyncio.sleep(0.20)
+                # 裁决窗口
+                await asyncio.sleep(0.20)
+                await _check_cancel()
 
-        # RREP
-        dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
-        rec(0x10, 0x30, MSG_RREP, pid, len(chosen), [], chosen)
-        bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_RREP,"msgTypeName":"RREP",
-               "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-               "dataHex":dhex,"checksum":0})
-        await asyncio.sleep(0.12)
-        for _ in chosen:
-            bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_RREP,"msgTypeName":"RREP",
-                   "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                   "dataHex":dhex,"checksum":0})
-            await asyncio.sleep(0.06)
+                # RREP
+                dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
+                rec(0x10, 0x30, MSG_RREP, pid, len(chosen), [], chosen)
+                bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_RREP,"msgTypeName":"RREP",
+                       "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
+                       "dataHex":dhex,"checksum":0})
+                await asyncio.sleep(0.12)
+                for _ in chosen:
+                    bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_RREP,"msgTypeName":"RREP",
+                           "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
+                           "dataHex":dhex,"checksum":0})
+                    await asyncio.sleep(0.06)
 
-        # DATA
-        dhex = ("".join(f"{c:02X}" for c in chosen) + payload).ljust(16, '0')
-        rec(0x30, 0x10, MSG_DATA, pid, len(chosen), [], chosen)
-        bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_DATA,"msgTypeName":"DATA",
-               "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-               "dataHex":dhex,"checksum":0})
-        await asyncio.sleep(0.12)
+                # DATA
+                dhex = ("".join(f"{c:02X}" for c in chosen) + payload).ljust(16, '0')
+                rec(0x30, 0x10, MSG_DATA, pid, len(chosen), [], chosen)
+                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_DATA,"msgTypeName":"DATA",
+                       "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
+                       "dataHex":dhex,"checksum":0})
+                await asyncio.sleep(0.12)
+                await _check_cancel()
 
-        # ACK ×3
-        for _ in range(3):
-            dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
-            rec(0x10, 0x30, MSG_ACK, pid, len(chosen), [], chosen)
-            bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_ACK,"msgTypeName":"ACK",
-                   "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                   "dataHex":dhex,"checksum":0})
-            await asyncio.sleep(0.05)
+                # ACK ×3
+                for _ in range(3):
+                    dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
+                    rec(0x10, 0x30, MSG_ACK, pid, len(chosen), [], chosen)
+                    bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_ACK,"msgTypeName":"ACK",
+                           "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
+                           "dataHex":dhex,"checksum":0})
+                    await asyncio.sleep(0.05)
 
-    return {"status":"ok","msg":f"✅ 模拟 {len(choices)} 轮 AODV-Lite 通信完成（含 RSSI 漂移）","rounds":len(choices)}
+            return {"status":"ok","msg":f"✅ 模拟 {len(choices)} 轮 AODV-Lite 通信完成（含 RSSI 漂移）","rounds":len(choices)}
+        except asyncio.CancelledError:
+            # 广播取消通知
+            asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                "type":"sys","msg":"⏹ 模拟已手动停止"
+            })), loop)
+            return {"status":"cancelled","msg":"模拟已停止","rounds":0}
 
 # ════════════════════ 定时推送 ════════════════════
 async def periodic_stats():
