@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>通信系统综合设计与实践</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+:root{--bg:#0b1120;--card:#111827;--brd:#1e293b;--txt:#cbd5e1;--mut:#64748b;
+  --cyan:#22d3ee;--orange:#f97316;--green:#22c55e;--yellow:#eab308;--red:#ef4444;--purple:#a78bfa;--blue:#3b82f6;}
+*{box-sizing:border-box;}
+body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system-ui,sans-serif;margin:0;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+@keyframes countUp{from{transform:translateY(10px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+@keyframes pulse{0%,100%{opacity:0.6;}50%{opacity:1;}}
+@keyframes slideIn{from{transform:translateX(20px);opacity:0;}to{transform:translateX(0);opacity:1;}}
+@keyframes panelIn{from{transform:translateX(100%);}to{transform:translateX(0);}}
+@keyframes particle{0%{stroke-dashoffset:100;}100%{stroke-dashoffset:0;}}
+.stat-change{animation:countUp .35s ease-out;}
+.log-entry{animation:slideIn .3s ease-out;}
+.btn-trans{transition:all .2s ease;}
+.btn-trans:hover{transform:translateY(-1px);}
+.custom-scroll::-webkit-scrollbar{width:4px;}
+.custom-scroll::-webkit-scrollbar-track{background:transparent;}
+.custom-scroll::-webkit-scrollbar-thumb{background:#334155;border-radius:2px;}
+.phase-step{transition:all .4s ease;}
+.phase-active{transform:scale(1.15);}
+.no-scrollbar::-webkit-scrollbar{display:none;}
+.no-scrollbar{-ms-overflow-style:none;scrollbar-width:none;}
+.tab-btn{transition:all .2s ease;}
+.tab-btn.active{border-bottom:2px solid var(--cyan);color:var(--cyan);}
+</style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+<!-- ════════════ HEADER ════════════ -->
+<header class="flex items-center justify-between px-5 py-2.5 flex-shrink-0" style="background:var(--card);border-bottom:1px solid var(--brd);">
+  <div class="flex items-center gap-3">
+    <div class="w-9 h-9 rounded-lg flex items-center justify-center text-lg" style="background:linear-gradient(135deg,#0ea5e9,#a78bfa);">📡</div>
+    <div>
+      <h1 class="text-lg font-bold tracking-wide" style="color:var(--cyan);">通信系统综合设计与实践</h1>
+      <p class="text-xs" style="color:var(--mut);">LoRa AODV-Lite · Real-time Topology &amp; RSSI Monitoring</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-2.5">
+    <select id="port-select" class="text-sm rounded-md px-2 py-1.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"><option value="">加载端口...</option></select>
+    <select id="baud-select" class="text-sm rounded-md px-2 py-1.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+      <option value="9600" selected>9600</option><option value="115200">115200</option></select>
+    <button id="btn-serial" onclick="toggleSerial()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md text-white" style="background:var(--cyan);">🔌 打开串口</button>
+    <div class="w-px h-5" style="background:var(--brd);"></div>
+    <button onclick="triggerSimulate()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md text-white" style="background:var(--purple);">🧪 模拟</button>
+    <button id="btn-autodemo" onclick="toggleAutoDemo()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">▶ 自动演示</button>
+    <button onclick="showChannelPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">⚙️ 信道</button>
+    <div class="w-px h-5" style="background:var(--brd);"></div>
+    <div id="ws-dot" class="w-2.5 h-2.5 rounded-full" style="background:var(--red);box-shadow:0 0 8px var(--red);"></div>
+    <span id="ws-label" class="text-xs font-mono" style="color:var(--mut);">离线</span>
+  </div>
+</header>
+
+<!-- ════════════ STATS BAR ════════════ -->
+<div id="stats-bar" class="flex gap-3 px-5 py-2 flex-shrink-0 overflow-x-auto no-scrollbar" style="background:var(--bg);border-bottom:1px solid var(--brd);"></div>
+
+<!-- ════════════ MAIN ════════════ -->
+<main class="flex flex-1 overflow-hidden relative">
+  <!-- 左：拓扑图 -->
+  <div id="topo-wrap" class="flex-1 relative" style="min-width:0;">
+    <div id="topology-chart" class="w-full h-full"></div>
+    <!-- 图例 (左上) -->
+    <div class="absolute top-3 left-3 rounded-lg p-3 text-xs space-y-1.5 pointer-events-none" style="background:rgba(17,24,39,0.85);border:1px solid var(--brd);">
+      <div class="text-xs font-bold mb-2" style="color:var(--mut);">📋 图例</div>
+      <div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full inline-block" style="background:#f97316;"></span> 主节点 mainTerm (0x10)</div>
+      <div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full inline-block" style="background:#22d3ee;"></span> 中继节点 relay (0x21/0x22)</div>
+      <div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full inline-block" style="background:#a78bfa;"></span> 终端节点 sender (0x30)</div>
+      <div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full inline-block" style="background:#0ea5e9;"></span> PC 网关</div>
+      <div class="flex items-center gap-2 mt-1"><span class="w-4 h-0.5 inline-block rounded" style="background:var(--green);box-shadow:0 0 6px var(--green);"></span> 选中路由路径</div>
+    </div>
+    <!-- 通信阶段指示器 (右上) -->
+    <div class="absolute top-3 right-3 rounded-lg p-3 text-xs pointer-events-none" style="background:rgba(17,24,39,0.85);border:1px solid var(--brd);">
+      <div class="text-xs font-bold mb-2" style="color:var(--mut);">🔄 通信阶段</div>
+      <div id="phase-indicator" class="flex items-center gap-1.5">
+        <div class="phase-step flex flex-col items-center" data-phase="rreq"><div class="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">1</div><span class="text-[9px] mt-0.5" style="color:var(--mut);">RREQ</span></div>
+        <div class="w-4 h-px" style="background:var(--brd);"></div>
+        <div class="phase-step flex flex-col items-center" data-phase="rrep"><div class="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">2</div><span class="text-[9px] mt-0.5" style="color:var(--mut);">RREP</span></div>
+        <div class="w-4 h-px" style="background:var(--brd);"></div>
+        <div class="phase-step flex flex-col items-center" data-phase="data"><div class="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">3</div><span class="text-[9px] mt-0.5" style="color:var(--mut);">DATA</span></div>
+        <div class="w-4 h-px" style="background:var(--brd);"></div>
+        <div class="phase-step flex flex-col items-center" data-phase="ack"><div class="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">4</div><span class="text-[9px] mt-0.5" style="color:var(--mut);">ACK</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右：Tab 面板 -->
+  <aside class="w-80 flex-shrink-0 flex flex-col border-l" style="background:var(--card);border-color:var(--brd);">
+    <div class="flex border-b" style="border-color:var(--brd);">
+      <button class="tab-btn active flex-1 py-2.5 text-xs font-bold text-center" data-tab="log" onclick="switchTab('log',this)">📜 日志流</button>
+      <button class="tab-btn flex-1 py-2.5 text-xs font-bold text-center" data-tab="node" onclick="switchTab('node',this)" style="color:var(--mut);">🔍 节点</button>
+      <button class="tab-btn flex-1 py-2.5 text-xs font-bold text-center" data-tab="link" onclick="switchTab('link',this)" style="color:var(--mut);">📶 链路</button>
+    </div>
+    <!-- Tab: 日志 -->
+    <div id="tab-log" class="flex-1 flex flex-col overflow-hidden">
+      <div class="flex gap-1 px-2.5 py-2 border-b flex-shrink-0 flex-wrap" style="border-color:var(--brd);">
+        <button class="filter-btn active" data-filter="all" onclick="setLogFilter('all',this)" style="padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;border:1px solid var(--cyan);color:var(--cyan);background:rgba(34,211,238,.1);">全部</button>
+        <button class="filter-btn" data-filter="RREQ" onclick="setLogFilter('RREQ',this)" style="padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;border:1px solid var(--brd);color:var(--mut);background:transparent;">RREQ</button>
+        <button class="filter-btn" data-filter="RREP" onclick="setLogFilter('RREP',this)" style="padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;border:1px solid var(--brd);color:var(--mut);background:transparent;">RREP</button>
+        <button class="filter-btn" data-filter="DATA" onclick="setLogFilter('DATA',this)" style="padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;border:1px solid var(--brd);color:var(--mut);background:transparent;">DATA</button>
+        <button class="filter-btn" data-filter="ACK" onclick="setLogFilter('ACK',this)" style="padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;border:1px solid var(--brd);color:var(--mut);background:transparent;">ACK</button>
+        <button class="filter-btn" data-filter="SYS" onclick="setLogFilter('SYS',this)" style="padding:2px 9px;border-radius:10px;font-size:10px;font-weight:600;border:1px solid var(--brd);color:var(--mut);background:transparent;">系统</button>
+      </div>
+      <div id="log-container" class="flex-1 overflow-y-auto custom-scroll px-2.5 py-2 space-y-1.5 font-mono text-xs"></div>
+    </div>
+    <!-- Tab: 节点 -->
+    <div id="tab-node" class="flex-1 overflow-y-auto custom-scroll p-3 hidden">
+      <div id="node-detail-empty" class="text-center py-10" style="color:var(--mut);">
+        <div class="text-4xl mb-3">🔍</div>
+        <p class="text-sm">点击拓扑图中的节点<br/>查看详细信息</p>
+      </div>
+      <div id="node-detail-content" class="hidden space-y-3"></div>
+    </div>
+    <!-- Tab: 链路 -->
+    <div id="tab-link" class="flex-1 overflow-y-auto custom-scroll p-3 hidden">
+      <div id="link-stats-content" class="space-y-2"></div>
+    </div>
+  </aside>
+</main>
+
+<!-- ════════════ BOTTOM: RSSI 趋势图 ════════════ -->
+<div id="rssi-panel" class="border-t flex-shrink-0" style="background:var(--card);border-color:var(--brd);height:190px;">
+  <div class="flex items-center justify-between px-4 py-1.5 border-b" style="border-color:var(--brd);">
+    <span class="text-xs font-semibold uppercase tracking-wider" style="color:var(--mut);">📶 RSSI 趋势图 (Signal Strength History)</span>
+    <button onclick="toggleRssiPanel()" class="text-xs" style="color:var(--mut);">▼ 收起</button>
+  </div>
+  <div id="rssi-chart" style="width:100%;height:155px;"></div>
+</div>
+
+<!-- ════════════ CHANNEL CONFIG PANEL ════════════ -->
+<div id="channel-panel" class="fixed right-0 top-0 h-full w-72 z-50 shadow-2xl" style="background:var(--card);border-left:1px solid var(--brd);transform:translateX(100%);transition:transform .3s ease;display:none;">
+  <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--brd);">
+    <h3 class="font-bold" style="color:var(--cyan);">⚙️ 信道配置</h3>
+    <button onclick="hideChannelPanel()" class="text-xl leading-none" style="color:var(--mut);">&times;</button>
+  </div>
+  <div class="p-4 space-y-4">
+    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">目标节点</label>
+      <select id="cfg-node" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+        <option value="0x10">主节点 mainTerm (0x10)</option><option value="0x21">中继 relay (0x21)</option>
+        <option value="0x22">中继 relay (0x22)</option><option value="0x30">终端 sender (0x30)</option></select></div>
+    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">频率 (MHz)</label>
+      <input id="cfg-freq" type="number" value="530" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"></div>
+    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">扩频因子 (SF)</label>
+      <select id="cfg-sf" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+        <option value="7" selected>SF7</option><option value="8">SF8</option><option value="9">SF9</option><option value="10">SF10</option><option value="11">SF11</option><option value="12">SF12</option></select></div>
+    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">发射功率 (dBm)</label>
+      <input id="cfg-power" type="number" value="17" min="2" max="20" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"></div>
+    <button onclick="sendChannelConfig()" class="w-full py-2 rounded-md text-sm font-bold text-white btn-trans" style="background:var(--cyan);">📤 下发配置</button>
+    <p class="text-xs leading-relaxed" style="color:var(--mut);">通过 PC→主节点→LoRa→目标节点下发。当前为演示模式。</p>
+  </div>
+</div>
+
+<script>
+// ════════════════════ 常量 ════════════════════
+const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22;
+const MSG_META={
+  [MSG_RREQ]:['RREQ','路由发现','#f97316'],
+  [MSG_RREP]:['RREP','路由应答','#22d3ee'],
+  [MSG_DATA]:['DATA','数据传输','#22c55e'],
+  [MSG_ACK]:['ACK','确认应答','#eab308'],
+  [MSG_HB]:['HB','心跳保活','#8b5cf6'],
+  [MSG_CMD]:['CMD','下行命令','#f59e0b'],
+  [MSG_CMD_ACK]:['CMD_OK','命令应答','#10b981'],
+  [MSG_JOIN]:['JOIN','入网请求','#ec4899'],
+  [MSG_JOIN_OK]:['JOIN_OK','入网允许','#22c55e'],
+  [MSG_JOIN_NO]:['JOIN_NO','入网拒绝','#ef4444'],
+};
+const NODE_META={
+  0x10:{role:'主节点',en:'mainTerm',color:'#f97316',size:60,cat:0},
+  0x21:{role:'中继节点',en:'relay',color:'#22d3ee',size:50,cat:1},
+  0x22:{role:'中继节点',en:'relay',color:'#22d3ee',size:50,cat:1},
+  0x30:{role:'终端节点',en:'sender',color:'#a78bfa',size:50,cat:2},
+};
+function hex(d){return'0x'+d.toString(16).toUpperCase().padStart(2,'0');}
+function hexS(d){return'0x'+d.toString(16).toUpperCase();}
+function meta(d){return NODE_META[d]||{role:'节点',en:'unknown',color:'#6b7280',size:45,cat:3};}
+function rssiColor(v){return v==null?'#6b7280':v>-45?'#22c55e':v>-60?'#eab308':'#ef4444';}
+
+// ════════════════════ 全局状态 ════════════════════
+let activeNodes={
+  'PC':{id:'PC',name:'PC 网关',cat:4,size:65,color:'#0ea5e9',lastSeen:Date.now(),decId:0},
+  '0x10':{id:'0x10',name:'主节点\n0x10',cat:0,size:60,color:'#f97316',lastSeen:Date.now(),decId:16}
+};
+let activeLinks={};
+let linkRssiCache={};
+let linkRssiHistory={}; // {linkKey: [{time, rssi}, ...]}
+let currentRoute=null;
+let logFilter='all',logEntries=[];
+let selectedTab='log',selectedNodeHex=null;
+let autoDemoId=null;
+
+// Init default links (canonical: lo-hex < hi-hex)
+activeLinks['PC-0x10']={source:'PC',target:'0x10',rssi:null,lineColor:'#0ea5e9',lineWidth:3,lineType:'solid',inRoute:false};
+activeLinks['0x10-0x30']={source:'0x10',target:'0x30',rssi:null,lineColor:'#6b7280',lineWidth:1.5,lineType:'dashed',inRoute:false};
+
+// ════════════════════ ECharts: 拓扑图 ════════════════════
+const topoDom=document.getElementById('topology-chart');
+const topoChart=echarts.init(topoDom,'dark');
+
+function makeTopoOption(){
+  return {
+    backgroundColor:'transparent',
+    tooltip:{
+      formatter:function(p){
+        if(p.dataType==='edge'){
+          let r=p.data.rssi,rs=r!==null&&r!==undefined?r+' dBm':'未知';
+          return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>RSSI: ${rs}`;
+        }
+        let n=activeNodes[p.data.id];
+        if(!n)return p.name;
+        let info=`<b>${n.name.replace('\n',' ')}</b><br/>最近活跃: ${((Date.now()-n.lastSeen)/1000).toFixed(0)}s 前`;
+        return info;
+      }
+    },
+    animationDurationUpdate:500,animationEasingUpdate:'cubicInOut',
+    series:[{
+      type:'graph',layout:'force',roam:true,draggable:true,
+      force:{repulsion:900,edgeLength:[120,250],gravity:0.08,friction:0.6},
+      data:Object.values(activeNodes).map(n=>({
+        id:n.id,name:n.name,category:n.cat,symbolSize:n.size,
+        itemStyle:{color:n.color,shadowBlur:n.id==='PC'?0:10,shadowColor:n.color,borderColor:n.color,borderWidth:n.id==='PC'?3:2},
+        label:{show:true,position:'bottom',distance:12,color:'#cbd5e1',fontSize:11,formatter:p=>p.name}
+      })),
+      links:Object.values(activeLinks).map(l=>({
+        source:l.source,target:l.target,
+        lineStyle:{color:l.inRoute?l.lineColor:l.lineColor,width:l.inRoute?Math.max(l.lineWidth,3.5):l.lineWidth,
+          type:l.lineType,opacity:l.inRoute?1:0.6,shadowBlur:l.inRoute?12:0,shadowColor:l.inRoute?l.lineColor:'transparent'},
+        label:{show:l.rssi!==null&&l.rssi!==undefined,formatter:l.rssi+' dBm',position:'middle',fontSize:10,color:'#94a3b8',backgroundColor:'rgba(11,17,32,0.85)',padding:[2,6],borderRadius:3}
+      })),
+      categories:[
+        {name:'主节点',itemStyle:{color:'#f97316'}},{name:'中继',itemStyle:{color:'#22d3ee'}},
+        {name:'终端',itemStyle:{color:'#a78bfa'}},{name:'未知',itemStyle:{color:'#6b7280'}},{name:'网关',itemStyle:{color:'#0ea5e9'}}
+      ]
+    }]
+  };
+}
+topoChart.setOption(makeTopoOption());
+window.addEventListener('resize',()=>topoChart.resize());
+
+// 节点点击 → 切换到节点详情 Tab
+topoChart.on('click',function(params){
+  if(params.dataType==='node'&&params.data.id!=='PC'){
+    selectedNodeHex=params.data.id;
+    switchTab('node',document.querySelector('[data-tab="node"]'));
+  }
+});
+
+function renderTopo(){topoChart.setOption(makeTopoOption(),true);}
+
+// ════════════════════ ECharts: RSSI 趋势图 ════════════════════
+const rssiDom=document.getElementById('rssi-chart');
+const rssiChart=echarts.init(rssiDom,'dark');
+rssiChart.setOption({
+  backgroundColor:'transparent',
+  grid:{left:50,right:20,top:15,bottom:25},
+  tooltip:{trigger:'axis',formatter:function(ps){return ps.map(p=>`${p.seriesName}: ${p.value[1]} dBm`).join('<br/>');}},
+  xAxis:{type:'time',axisLabel:{fontSize:9,color:'#64748b'},splitLine:{show:false}},
+  yAxis:{type:'value',name:'RSSI (dBm)',nameTextStyle:{fontSize:9,color:'#64748b'},axisLabel:{fontSize:9,color:'#64748b'},splitLine:{lineStyle:{color:'#1e293b'}}},
+  series:[]
+});
+window.addEventListener('resize',()=>{topoChart.resize();rssiChart.resize();});
+
+function updateRssiChart(){
+  const now=Date.now();
+  let series=[];
+  const linkColors={'0x21': '#22d3ee', '0x22': '#a78bfa'};
+  // 为每条有历史数据的链路创建 series
+  for(let lk in linkRssiHistory){
+    if(linkRssiHistory[lk].length<2)continue;
+    let data=linkRssiHistory[lk].map(p=>[p.time*1000,p.rssi]).filter(p=>p[0]>now-120000);
+    if(data.length<2)continue;
+    // 链路名称简化
+    let name=lk.replace('0x30-','sender→').replace('-0x10','→main').replace('0x','');
+    let color=linkColors[lk.split('-')[0]]||linkColors[lk.split('-')[1]]||'#6b7280';
+    series.push({name:lk,type:'line',data:data,smooth:true,symbol:'none',
+      lineStyle:{color:color,width:2},itemStyle:{color:color}});
+  }
+  if(series.length>0){
+    rssiChart.setOption({series:series},true);
+  }
+}
+
+function toggleRssiPanel(){
+  const p=document.getElementById('rssi-panel');
+  const btn=p.querySelector('button');
+  if(p.style.height!=='36px'){p.style.height='36px';btn.textContent='▶ 展开';}
+  else{p.style.height='190px';btn.textContent='▼ 收起';rssiChart.resize();}
+}
+
+// ════════════════════ 统计仪表盘 ════════════════════
+const STAT_CARDS=[
+  {key:'totalFrames',label:'总帧数',icon:'📊',color:'#3b82f6'},
+  {key:'rreqCount',label:'RREQ',icon:'🔍',color:'#f97316'},
+  {key:'rrepCount',label:'RREP',icon:'📬',color:'#22d3ee'},
+  {key:'dataCount',label:'DATA',icon:'📦',color:'#22c55e'},
+  {key:'ackCount',label:'ACK',icon:'✅',color:'#eab308'},
+  {key:'successRate',label:'成功率',icon:'📈',color:'#a78bfa',suffix:'%'},
+];
+let lastStats={};
+
+function updateStats(s){
+  if(!s)return;
+  const bar=document.getElementById('stats-bar');
+  if(bar.children.length===0){
+    bar.innerHTML=STAT_CARDS.map(c=>`
+      <div class="flex-1 min-w-[110px] rounded-lg px-3 py-2 flex items-center gap-2.5" style="background:var(--card);border:1px solid var(--brd);">
+        <span class="text-xl">${c.icon}</span>
+        <div>
+          <div class="text-[10px] font-semibold uppercase tracking-wide" style="color:var(--mut);">${c.label}</div>
+          <div id="stat-${c.key}" class="text-lg font-bold stat-change" style="color:${c.color};">${c.suffix==='%'?'0.0%':'0'}</div>
+        </div>
+      </div>`).join('');
+  }
+  STAT_CARDS.forEach(c=>{
+    const el=document.getElementById('stat-'+c.key);
+    if(!el)return;
+    const old=lastStats[c.key]??-1;let v=s[c.key]??0;
+    let t=c.suffix==='%'?v.toFixed(1)+'%':String(v);
+    if(old!==v){el.textContent=t;el.classList.remove('stat-change');void el.offsetWidth;el.classList.add('stat-change');}
+  });
+  lastStats={...s};
+}
+
+// ════════════════════ 通信阶段指示器 ════════════════════
+let lastPhase=null;
+function updatePhaseIndicator(phase){
+  if(phase===lastPhase)return;lastPhase=phase;
+  const phases=['rreq','rrep','data','ack'];
+  const colors={rreq:'#f97316',rrep:'#22d3ee',data:'#22c55e',ack:'#eab308'};
+  const idx=phases.indexOf(phase);
+  document.querySelectorAll('.phase-step').forEach((el,i)=>{
+    const circle=el.querySelector('div:first-child');
+    const label=el.querySelector('span');
+    if(i<idx){
+      circle.style.background=colors[phases[i]]+'22';circle.style.borderColor=colors[phases[i]];
+      circle.style.color=colors[phases[i]];circle.textContent='✓';
+      label.style.color=colors[phases[i]];
+    }else if(i===idx){
+      circle.style.background=colors[phase];circle.style.borderColor=colors[phase];
+      circle.style.color='#fff';circle.textContent=String(i+1);circle.classList.add('phase-active');
+      label.style.color=colors[phase];
+    }else{
+      circle.style.background='transparent';circle.style.borderColor='var(--brd)';
+      circle.style.color='var(--mut)';circle.textContent=String(i+1);circle.classList.remove('phase-active');
+      label.style.color='var(--mut)';
+    }
+  });
+  setTimeout(()=>document.querySelectorAll('.phase-active').forEach(e=>e.classList.remove('phase-active')),600);
+}
+
+// ════════════════════ 拓扑更新 ════════════════════
+function ensureNode(decId,now){
+  const h=hex(decId),m=meta(decId);
+  if(!activeNodes[h]){
+    activeNodes[h]={id:h,name:`${m.role}\n${hexS(decId)}`,cat:m.cat,size:m.size,color:m.color,lastSeen:now,decId:decId};
+    addLog('SYS','拓扑发现',`${m.role} [${hexS(decId)}] 入网`,'#eab308');
+  }
+  activeNodes[h].lastSeen=now;activeNodes[h].color=m.color;activeNodes[h].size=m.size;
+  return h;
+}
+
+function setLink(aHex,bHex,rssiVal,msgType,now){
+  const idA=parseInt(aHex,16),idB=parseInt(bHex,16);
+  const lo=idA<idB?aHex:bHex,hi=idA<idB?bHex:aHex;
+  const linkId=`${lo}-${hi}`;
+  let lc,lw,lt;
+  if(msgType===MSG_RREQ){lc='#f97316';lw=1.5;lt='dashed';}
+  else if(msgType===MSG_RREP){lc='#22d3ee';lw=2;lt='solid';}
+  else if(msgType===MSG_DATA){lc='#22c55e';lw=3;lt='solid';}
+  else{lc='#eab308';lw=1.5;lt='solid';}
+  if(rssiVal!==null&&rssiVal!==undefined){lc=rssiColor(rssiVal);}
+  const oldRssi=activeLinks[linkId]?.rssi??null;
+  activeLinks[linkId]={source:lo,target:hi,rssi:rssiVal!==null&&rssiVal!==undefined?rssiVal:oldRssi,lineColor:lc,lineWidth:lw,lineType:lt,inRoute:false};
+  if(rssiVal!==null&&rssiVal!==undefined){
+    linkRssiCache[linkId]=rssiVal;
+    if(!linkRssiHistory[linkId])linkRssiHistory[linkId]=[];
+    linkRssiHistory[linkId].push({time:now/1000,rssi:rssiVal});
+    if(linkRssiHistory[linkId].length>120)linkRssiHistory[linkId].shift();
+    if(selectedTab==='link')renderLinkStats();
+  }
+}
+
+function updateTopology(src,dest,msgType,pathId,count,stamps,relays,lastHopRssi){
+  const now=Date.now();
+  const srcHex=ensureNode(src,now),destHex=ensureNode(dest,now);
+  if(msgType===MSG_RREQ){
+    if(stamps&&stamps.length>0){
+      let prevId=src;
+      for(const s of stamps){
+        const rDec=parseInt(s.id,16);ensureNode(rDec,now);
+        setLink(hex(prevId),s.id,s.rssi,MSG_RREQ,now);
+        prevId=rDec;
+      }
+      if(dest===0x10)setLink(hex(prevId),destHex,lastHopRssi??null,MSG_RREQ,now);
+    }else{setLink(srcHex,destHex,lastHopRssi??null,MSG_RREQ,now);}
+  }else if(msgType===MSG_RREP||msgType===MSG_DATA||msgType===MSG_ACK){
+    if(relays&&relays.length>0){
+      let prevId=src;
+      for(const rDec of relays){ensureNode(rDec,now);const lk=prevId<rDec?`${hex(prevId)}-${hex(rDec)}`:`${hex(rDec)}-${hex(prevId)}`;setLink(hex(prevId),hex(rDec),linkRssiCache[lk]??null,msgType,now);prevId=rDec;}
+      setLink(hex(prevId),destHex,lastHopRssi??null,msgType,now);
+    }else if((src===0x10&&dest===0x30)||(src===0x30&&dest===0x10)){setLink(srcHex,destHex,lastHopRssi??null,msgType,now);}
+  }
+  if(msgType===MSG_RREP&&relays!==undefined){currentRoute={pathId,relays:[...relays],updated:now};applyRouteHighlight(relays);}
+  updatePhaseIndicator(msgType===MSG_RREQ?'rreq':msgType===MSG_RREP?'rrep':msgType===MSG_DATA?'data':msgType===MSG_ACK?'ack':'idle');
+  renderTopo();
+  updateRssiChart();
+  updateLinkStatsIfActive();
+}
+
+function applyRouteHighlight(relays){
+  for(let k in activeLinks)activeLinks[k].inRoute=false;
+  if(relays.length===0){
+    const dk='0x10-0x30';if(activeLinks[dk])activeLinks[dk].inRoute=true;
+  }else{
+    const pathIds=[0x30,...relays,0x10];
+    for(let i=0;i<pathIds.length-1;i++){
+      const idA=pathIds[i],idB=pathIds[i+1];
+      const lo=idA<idB?hex(idA):hex(idB),hi=idA<idB?hex(idB):hex(idA);
+      if(activeLinks[`${lo}-${hi}`])activeLinks[`${lo}-${hi}`].inRoute=true;
+    }
+  }
+  if(selectedTab==='link')renderLinkStats();
+}
+
+// ════════════════════ Tab 切换 ════════════════════
+function switchTab(tab,btn){
+  selectedTab=tab;
+  document.querySelectorAll('.tab-btn').forEach(b=>{b.classList.remove('active');b.style.color='var(--mut)';});
+  btn.classList.add('active');btn.style.color='var(--cyan)';
+  document.getElementById('tab-log').style.display=tab==='log'?'flex':'none';
+  document.getElementById('tab-node').classList.toggle('hidden',tab!=='node');
+  document.getElementById('tab-link').classList.toggle('hidden',tab!=='link');
+  if(tab==='node'&&selectedNodeHex)renderNodeDetail(selectedNodeHex);
+  if(tab==='link')renderLinkStats();
+}
+
+// ════════════════════ 节点详情 ════════════════════
+function renderNodeDetail(nodeHex){
+  const n=activeNodes[nodeHex];if(!n)return;
+  const empty=document.getElementById('node-detail-empty');
+  const content=document.getElementById('node-detail-content');
+  empty.classList.add('hidden');content.classList.remove('hidden');
+  const m=meta(n.decId||parseInt(nodeHex,16));
+  const idle=((Date.now()-n.lastSeen)/1000).toFixed(0);
+  // 找出涉及该节点的链路
+  let nodeLinks=[];
+  for(let lk in activeLinks){
+    if(lk.includes(nodeHex))nodeLinks.push({key:lk,...activeLinks[lk]});
+  }
+  content.innerHTML=`
+    <div class="flex items-center gap-3 mb-3">
+      <div class="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold" style="background:${n.color}22;border:2px solid ${n.color};color:${n.color};">${nodeHex}</div>
+      <div><div class="font-bold text-sm">${m.role} <span style="color:var(--mut);">${m.en}</span></div><div class="text-xs" style="color:var(--mut);">活跃: ${idle}s 前</div></div>
+    </div>
+    <div class="grid grid-cols-2 gap-2">
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">ID (HEX)</div><div class="font-mono text-sm">${nodeHex}</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">ID (DEC)</div><div class="font-mono text-sm">${parseInt(nodeHex,16)}</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">类别</div><div class="font-bold text-sm" style="color:${n.color};">${m.role}</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">最后活跃</div><div class="text-sm">${idle}s 前</div></div>
+    </div>
+    <div class="text-xs font-bold mt-2" style="color:var(--mut);">相关链路 (${nodeLinks.length})</div>
+    ${nodeLinks.map(l=>`
+      <div class="flex items-center justify-between rounded p-2 text-xs" style="background:var(--bg);">
+        <span class="font-mono">${l.key}</span>
+        <span style="color:${rssiColor(l.rssi)};">${l.rssi!==null&&l.rssi!==undefined?l.rssi+' dBm':'--'}</span>
+      </div>`).join('')}
+    <button onclick="switchTab('log',document.querySelector('[data-tab=log]'))" class="w-full mt-2 py-1.5 rounded text-xs font-bold btn-trans" style="background:var(--brd);color:var(--txt);">返回日志流</button>
+  `;
+}
+
+// ════════════════════ 链路统计 ════════════════════
+function renderLinkStats(){
+  const container=document.getElementById('link-stats-content');
+  const links=Object.entries(activeLinks).filter(([k])=>k!=='PC-0x10');
+  if(links.length===0){container.innerHTML=`<p class="text-xs text-center py-6" style="color:var(--mut);">暂无链路数据</p>`;return;}
+  container.innerHTML=links.map(([key,l])=>{
+    const inRoute=l.inRoute;
+    return`<div class="rounded-lg p-2.5 text-xs" style="background:var(--bg);border:1px solid ${inRoute?l.lineColor:'var(--brd)'};${inRoute?'box-shadow:0 0 8px '+l.lineColor+'44;':''}">
+      <div class="flex items-center justify-between mb-1">
+        <span class="font-mono font-bold">${key}</span>
+        ${inRoute?'<span class="text-[10px] font-bold" style="color:var(--green);">★ 当前路由</span>':''}
+      </div>
+      <div class="flex items-center gap-3">
+        <span>RSSI: <b style="color:${rssiColor(l.rssi)};">${l.rssi!==null&&l.rssi!==undefined?l.rssi+' dBm':'未知'}</b></span>
+        <span>类型: <span style="color:${l.lineColor};">${l.lineType==='dashed'?'虚线':'实线'}</span></span>
+        <span>宽度: ${l.lineWidth}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateLinkStatsIfActive(){if(selectedTab==='link')renderLinkStats();}
+
+// ════════════════════ 日志系统 ════════════════════
+function addLog(type,title,detail,color){
+  logEntries.unshift({type,title,detail,color,time:Date.now()});
+  if(logEntries.length>300)logEntries.length=300;
+  renderLogs();
+}
+
+function renderLogs(){
+  const c=document.getElementById('log-container');if(!c)return;
+  const filtered=logFilter==='all'?logEntries:logEntries.filter(e=>e.type===logFilter);
+  c.innerHTML=filtered.slice(0,120).map(e=>{
+    const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
+    return`<div class="log-entry rounded p-2 border" style="background:var(--bg);border-color:var(--brd);">
+      <div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-600 text-[9px]">${t}</span></div>
+      <div class="leading-relaxed text-[11px]">${e.detail}</div></div>`;
+  }).join('');
+}
+
+function setLogFilter(f,btn){
+  logFilter=f;
+  document.querySelectorAll('.filter-btn').forEach(b=>{b.classList.remove('active');b.style.borderColor='var(--brd)';b.style.color='var(--mut)';b.style.background='transparent';});
+  btn.classList.add('active');
+  const fc=f==='SYS'?'#22c55e':f==='RREQ'?'#f97316':f==='RREP'?'#22d3ee':f==='DATA'?'#22c55e':f==='ACK'?'#eab308':'var(--cyan)';
+  btn.style.borderColor=fc;btn.style.color=fc;btn.style.background=fc+'18';
+  renderLogs();
+}
+
+// ════════════════════ 信道面板 ════════════════════
+function showChannelPanel(){const p=document.getElementById('channel-panel');p.style.display='block';requestAnimationFrame(()=>{p.style.transform='translateX(0)';});}
+function hideChannelPanel(){const p=document.getElementById('channel-panel');p.style.transform='translateX(100%)';setTimeout(()=>{p.style.display='none';},300);}
+function sendChannelConfig(){
+  const node=document.getElementById('cfg-node').value,freq=document.getElementById('cfg-freq').value;
+  const sf=document.getElementById('cfg-sf').value,power=document.getElementById('cfg-power').value;
+  const cmd=`CFG:${node}:F${freq}:S${sf}:P${power}`;
+  if(globalWs&&globalWs.readyState===1)globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
+  addLog('SYS','配置',`下发至${node}: ${freq}MHz SF${sf} ${power}dBm`,'#a78bfa');
+  hideChannelPanel();
+}
+
+// ════════════════════ 自动演示 ════════════════════
+function toggleAutoDemo(){
+  const btn=document.getElementById('btn-autodemo');
+  if(autoDemoId){clearInterval(autoDemoId);autoDemoId=null;btn.innerHTML='▶ 自动演示';btn.style.background='var(--card)';btn.style.color='var(--txt)';btn.style.border='1px solid var(--brd)';}
+  else{btn.innerHTML='⏸ 停止演示';btn.style.background='var(--green)';btn.style.color='#fff';btn.style.border='none';
+    triggerSimulate();autoDemoId=setInterval(()=>triggerSimulate(),6000);}
+}
+
+// ════════════════════ 垃圾回收 ════════════════════
+setInterval(()=>{
+  let dirty=false;const now=Date.now();
+  for(let id in activeNodes){if(id==='PC'||id==='0x10')continue;if(now-activeNodes[id].lastSeen>20000){delete activeNodes[id];for(let lk in activeLinks){if(activeLinks[lk].source===id||activeLinks[lk].target===id)delete activeLinks[lk];}dirty=true;addLog('SYS','离线',`${id} 超时 20s 已移除`,'#ef4444');}}
+  if(dirty){renderTopo();updateRssiChart();}
+},4000);
+
+// ════════════════════ WebSocket ════════════════════
+let isSerialOpen=false,globalWs=null;
+
+function toggleSerial(){
+  const port=document.getElementById('port-select').value,baud=document.getElementById('baud-select').value,btn=document.getElementById('btn-serial');
+  if(!port){alert('请选择串口');return;}
+  if(!isSerialOpen){globalWs.send(JSON.stringify({action:'open_serial',port,baudrate:parseInt(baud)}));btn.innerHTML='⏹ 关闭串口';btn.style.background='#ef4444';isSerialOpen=true;}
+  else{globalWs.send(JSON.stringify({action:'close_serial'}));btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;}
+}
+
+async function fetchPorts(){
+  try{const r=await fetch('/api/ports');const d=await r.json();const s=document.getElementById('port-select');s.innerHTML=d.ports.length===0?'<option value="">未找到串口</option>':d.ports.map(p=>`<option value="${p}">${p}</option>`).join('');}catch(e){}
+}
+
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss':'ws';globalWs=new WebSocket(`${proto}://${location.host}/ws`);
+  globalWs.onopen=()=>{
+    document.getElementById('ws-dot').style.background='var(--green)';document.getElementById('ws-dot').style.boxShadow='0 0 10px var(--green)';
+    document.getElementById('ws-label').textContent='在线';document.getElementById('ws-label').style.color='var(--green)';fetchPorts();
+  };
+  globalWs.onclose=()=>{
+    document.getElementById('ws-dot').style.background='var(--red)';document.getElementById('ws-dot').style.boxShadow='0 0 10px var(--red)';
+    document.getElementById('ws-label').textContent='离线';document.getElementById('ws-label').style.color='var(--mut)';
+    setTimeout(connectWS,3000);
+  };
+  globalWs.onmessage=(ev)=>{
+    const d=JSON.parse(ev.data);
+    if(d.type==='sys'){addLog('SYS','系统',d.msg,'#22c55e');return;}
+    if(d.type==='sys_error'){addLog('SYS','错误',d.msg,'#ef4444');const btn=document.getElementById('btn-serial');btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;return;}
+    if(d.type==='stats'){updateStats(d.data);
+      if(d.data.currentRoute){currentRoute=d.data.currentRoute;applyRouteHighlight(currentRoute.relays||[]);renderTopo();}
+      if(d.data.currentPhase)updatePhaseIndicator(d.data.currentPhase);
+      if(d.data.rssiHistory){for(let lk in d.data.rssiHistory){if(!linkRssiHistory[lk])linkRssiHistory[lk]=[];d.data.rssiHistory[lk].forEach(p=>{if(!linkRssiHistory[lk].find(x=>Math.abs(x.time-p.t)<0.1))linkRssiHistory[lk].push({time:p.t,rssi:p.rssi});});if(linkRssiHistory[lk].length>120)linkRssiHistory[lk]=linkRssiHistory[lk].slice(-120);}updateRssiChart();}
+      return;
+    }
+    if(d.type==='text_log'){addLog('SYS','串口',d.text,'#0ea5e9');return;}
+    if(d.type==='frame'){
+      const m=MSG_META[d.msgType]||['UNKN','未知','#6b7280'];
+      let detail=`<span style="color:var(--mut);">${hexS(d.src)} ➔ ${hexS(d.dest)}</span><br/>`;
+      detail+=`类型: <span style="color:${m[2]};">${m[0]} ${m[1]}</span> &nbsp; pathId=<b>${d.pathId}</b> count=<b>${d.count}</b>`;
+      if(d.rssiStamps&&d.rssiStamps.length>0){const ss=d.rssiStamps.map(s=>`${s.id}:<b style="color:${rssiColor(s.rssi)};">${s.rssi}dBm</b>`).join(', ');detail+=`<br/>📶 印章: [${ss}]`;}
+      if(d.relays&&d.relays.length>0){detail+=`<br/>🛤 路径: <b style="color:var(--green);">${d.relays.map(r=>hexS(r)).join(' → ')}</b>`;}
+      if(d.relays&&d.relays.length===0&&d.msgType===MSG_RREP){detail+=`<br/>🛤 路径: <b style="color:var(--green);">★ 直达 DIRECT</b>`;}
+      detail+=`<br/><span style="color:var(--mut);font-size:10px;">data: ${d.dataHex}</span>`;
+      addLog(m[0],m[0]+' '+m[1],detail,m[2]);
+      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{ensureNode(d.src,Date.now());if(d.dest!==0x00)ensureNode(d.dest,Date.now());renderTopo();}
+      if(d.stats)updateStats(d.stats);
+    }
+  };
+}
+
+async function triggerSimulate(){
+  addLog('SYS','模拟','正在触发模拟通信...','#a78bfa');
+  try{const r=await fetch('/api/simulate');const d=await r.json();addLog('SYS','完成',d.msg,'#22c55e');}catch(e){addLog('SYS','错误',String(e),'#ef4444');}
+}
+
+// ════════════════════ 启动 ════════════════════
+connectWS();
+updateStats({totalFrames:0,rreqCount:0,rrepCount:0,dataCount:0,ackCount:0,successRate:0});
+// 初始更新 RSSI 图
+setInterval(updateRssiChart,5000);
+</script>
+</body>
+</html>
