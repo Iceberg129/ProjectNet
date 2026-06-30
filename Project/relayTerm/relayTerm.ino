@@ -17,6 +17,12 @@ const uint8_t MSG_RREP       = 0x11;   // 探路应答
 const uint8_t MSG_DATA       = 0x01;   // 用户数据
 const uint8_t MSG_ACK        = 0x02;   // 数据确认
 const uint8_t MSG_ACK_CONFIRM = 0x06;   // ACK 确认回执
+const uint8_t MSG_JOIN_REQ = 0x20;
+const uint8_t MSG_JOIN_ACK = 0x21;
+const uint8_t MSG_JOIN_REJ = 0x22;
+const uint8_t MSG_CMD = 0x04;
+const uint8_t MSG_CMD_ACK = 0x05;
+const uint8_t MSG_HB       = 0x03;   // heartbeat
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t MAX_STAMPS     = 4;      // 最多 4 对 {id, rssi} = 8 字节
 const uint8_t FRAME_SIZE     = 16;
@@ -45,6 +51,8 @@ struct PendingFwd {
 };
 PendingFwd pending[MAX_PENDING];
 uint8_t pendingCount = 0;
+uint32_t lastHbTime    = 0;
+uint16_t hbInterval    = 10000;
 
 // ---------- 全局接收缓冲 ----------
 LoRaFrame rxFrame;
@@ -108,6 +116,12 @@ void setup() {
 // =============================================
 void loop() {
   static uint32_t lastCheck = 0;
+  // Heartbeat: 10s +/- 2s jitter
+  if (millis() - lastHbTime >= hbInterval) {
+    sendHeartbeat();
+    lastHbTime = millis();
+    hbInterval = 8000 + random(4000);
+  }
   if (millis() - lastCheck >= 5) {
     lastCheck = millis();
     handlePacket();
@@ -219,6 +233,24 @@ bool enqueueForward(LoRaFrame* f, uint32_t backoff, int8_t rssi, const __FlashSt
 // =============================================
 // 收包 → 校验 → 分发
 // =============================================
+// =============================================
+// Heartbeat: periodic liveness signal to mainTerm
+// =============================================
+void sendHeartbeat() {
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = 0x10;
+  frame.msgType = MSG_HB;
+  calcChecksum(&frame);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.println(F("HB tx"));
+}
+
 void handlePacket() {
   int pktSize = LoRa.parsePacket();
   if (pktSize != FRAME_SIZE) {
@@ -246,6 +278,11 @@ void handlePacket() {
       case MSG_RREQ:  handleRREQ(rssi);  break;
       case MSG_RREP:  handleRREP();      break;
       case MSG_DATA:  handleDATA();      break;
+      case MSG_JOIN_REJ:  handleJOIN();            break;
+      case MSG_JOIN_ACK:
+      case MSG_JOIN_REQ:
+      case MSG_CMD_ACK:   handleCMD();            break;
+      case MSG_CMD:
       case MSG_ACK:   handleACK();       break;
       case MSG_ACK_CONFIRM: handleACK(); break;
       default: break;
@@ -371,6 +408,38 @@ void handleACK() {
   // ★ 位置退避：多头中继避免同时转发碰撞
   uint32_t backoff = myPos * 60 + 10;
   enqueueForward(&rxFrame, backoff, 0, F("ACK"));
+}
+
+// =============================================
+// JOIN frame: dedup + transparent forward (no RSSI stamp)
+// =============================================
+void handleJOIN() {
+  if (wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
+    Serial.println(F("  JOIN dup"));
+    return;
+  }
+  markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
+  uint16_t backoff = (MY_NODE_ID & 0x0F) * 40 + 20;
+  enqueueForward(&rxFrame, backoff, 0, F("JOIN"));
+}
+
+// =============================================
+// CMD frame: check if in relay path, then forward
+// =============================================
+void handleCMD() {
+  uint8_t relayCount = rxFrame.data[0];
+  bool inPath = (relayCount == 0);  // relayCount==0 = broadcast/direct, forward
+  for (uint8_t i = 0; i < relayCount && i < MAX_RELAYS; i++) {
+    if (rxFrame.data[1 + i] == MY_NODE_ID) { inPath = true; break; }
+  }
+  if (!inPath) { Serial.println(F("  CMD not in path")); return; }
+  if (wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
+    Serial.println(F("  CMD dup"));
+    return;
+  }
+  markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
+  uint16_t backoff = (MY_NODE_ID & 0x0F) * 40 + 20;
+  enqueueForward(&rxFrame, backoff, 0, F("CMD"));
 }
 
 // =============================================

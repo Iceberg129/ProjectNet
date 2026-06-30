@@ -15,6 +15,12 @@ const uint8_t MSG_RREP       = 0x11;
 const uint8_t MSG_DATA       = 0x01;
 const uint8_t MSG_ACK        = 0x02;
 const uint8_t MSG_ACK_CONFIRM = 0x06;  // ACK 确认回执
+const uint8_t MSG_JOIN_REQ = 0x20;
+const uint8_t MSG_JOIN_ACK = 0x21;
+const uint8_t MSG_JOIN_REJ = 0x22;
+const uint8_t MSG_CMD = 0x04;
+const uint8_t MSG_CMD_ACK = 0x05;
+const uint8_t MSG_HB       = 0x03;   // heartbeat
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t FRAME_SIZE     = 16;
 
@@ -51,8 +57,8 @@ uint8_t  knownRelayCount = 0;
 uint8_t  missingRetryCount = 0;
 const uint8_t MAX_MISSING_RETRIES = 2;  // 缺失中继最多重试 2 次
 
-enum DiscState { IDLE, WAITING_RREP, WAITING_ACK };
-DiscState discState    = IDLE;
+enum DiscState { JOINING, IDLE, WAITING_RREP, WAITING_ACK };
+DiscState discState    = JOINING;
 uint32_t  rreqSendTime = 0;
 uint32_t  ackSendTime  = 0;
 uint32_t  lastAction   = 0;       // 全局，ACK 后重置用
@@ -60,6 +66,13 @@ const uint32_t RREP_TIMEOUT   = 2000;
 const uint32_t ACK_TIMEOUT    = 3500;  // >= mainTerm 的 3×800ms + 回程余量
 const uint32_t ROUTE_MAX_AGE  = 10000;  // 10 秒路由老化（每轮 ACK 后主动清掉）
 const uint8_t  MAX_RREQ_RETRIES = 3;    // RREQ 最多重试次数（同一路径连续失败才视作不可达）
+bool joinedNetwork = false;
+uint8_t joinRetryCount = 0;
+const uint8_t MAX_JOIN_RETRIES = 3;
+const uint32_t JOIN_TIMEOUT = 3000;
+uint32_t joinSendTime = 0;
+uint32_t lastHbTime    = 0;
+uint16_t hbInterval    = 10000;
 
 // =============================================
 void setup() {
@@ -84,7 +97,33 @@ void setup() {
 // =============================================
 void loop() {
   checkForPacket();
+  // Heartbeat: 10s +/- 2s jitter
+  if (millis() - lastHbTime >= hbInterval) {
+    sendHeartbeat();
+    lastHbTime = millis();
+    hbInterval = 8000 + random(4000);  // 8-12s
+  }
 
+  if (discState == JOINING) {
+    if (!joinedNetwork) {
+      if (joinRetryCount == 0 || (millis() - joinSendTime > JOIN_TIMEOUT)) {
+        if (joinRetryCount >= MAX_JOIN_RETRIES) {
+          Serial.println(F("JOIN failed after max retries"));
+          discState = IDLE;
+          lastAction = millis();
+          return;
+        }
+        if (joinRetryCount > 0) { Serial.print(F("JOIN retry ")); Serial.println(joinRetryCount, DEC); }
+        sendJOIN();
+        joinRetryCount++;
+      }
+      return;
+    }
+    discState = IDLE;
+    lastAction = millis();
+    Serial.println(F("JOIN complete -> IDLE"));
+    return;
+  }
   uint32_t now = millis();
 
   if (discState == IDLE) {
@@ -145,6 +184,74 @@ void loop() {
 }
 
 // =============================================
+// =============================================
+// Receive channel config command and apply
+void handleCMD(LoRaFrame* rx) {
+  uint16_t freq  = ((uint16_t)rx->data[3] << 8) | rx->data[4];
+  uint8_t  sf    = rx->data[5];
+  uint8_t  power = rx->data[6];
+  int rssi = LoRa.packetRssi();
+  Serial.print(F("CMD F=")); Serial.print(freq, DEC);
+  Serial.print(F(" SF")); Serial.print(sf, DEC);
+  Serial.print(F(" P")); Serial.print(power, DEC);
+  Serial.print(F(" r=")); Serial.print(rssi, DEC);
+  uint8_t status = 0;
+  if (freq < 137 || freq > 1020) { status = 1; }
+  else if (sf < 7 || sf > 12)    { status = 2; }
+  else if (power < 2 || power > 20)   { status = 3; }
+  else if (!LoRa.begin(freq * 1000000UL)) { status = 4; }
+  else { LoRa.setSpreadingFactor(sf); LoRa.setTxPower(power); Serial.println(F(" OK")); }
+  if (status != 0) { Serial.print(F(" fail ")); Serial.println(status, DEC); }
+  LoRaFrame ack;
+  memset(&ack, 0, FRAME_SIZE);
+  ack.head[0] = FRAME_HEADER_0;
+  ack.head[1] = FRAME_HEADER_1;
+  ack.srcId   = MY_NODE_ID;
+  ack.destId  = rx->srcId;
+  ack.msgType = MSG_CMD_ACK;
+  ack.data[0] = status;
+  calcChecksum(&ack);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&ack, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.print(F("CMD_ACK tx status=")); Serial.println(status, DEC);
+}
+
+void sendHeartbeat() {
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = DEST_ID;
+  frame.msgType = MSG_HB;
+  frame.data[0] = 0;
+  calcChecksum(&frame);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.print(F("HB tx r="));
+  Serial.println(LoRa.packetRssi(), DEC);
+}
+
+void sendJOIN() {
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = DEST_ID;
+  frame.msgType = MSG_JOIN_REQ;
+  frame.data[0] = 2;
+  calcChecksum(&frame);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  joinSendTime = millis();
+  Serial.print(F("JOIN tx -> 0x"));
+  Serial.println(DEST_ID, HEX);
+}
+
 void sendRREQ() {
   LoRaFrame frame;
   memset(&frame, 0, FRAME_SIZE);
@@ -192,7 +299,25 @@ void checkForPacket() {
   if (frame.destId != MY_NODE_ID) {
     return;
   }
-  if (frame.msgType != MSG_RREP && frame.msgType != MSG_ACK) {
+  if (discState == JOINING) {
+    if (frame.msgType == MSG_JOIN_ACK) {
+      joinedNetwork = true;
+      Serial.println(F("JOIN_OK <- mainTerm"));
+      return;
+    } else if (frame.msgType == MSG_JOIN_REJ) {
+      Serial.print(F("JOIN_REJ <- mainTerm code=0x"));
+      Serial.println(frame.data[0], HEX);
+      discState = IDLE;
+      lastAction = millis();
+      return;
+    }
+    return;
+  }
+  if (frame.msgType == MSG_CMD) {
+    handleCMD(&frame);
+    return;
+  }
+  if (frame.msgType != MSG_RREP && frame.msgType != MSG_ACK && frame.msgType != MSG_CMD) {
     return;  // 只关心 RREP 和 ACK
   }
   if (!verifyChecksum(&frame)) {

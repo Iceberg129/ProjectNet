@@ -1013,6 +1013,26 @@ function connectWS(){
       if(d.data.rssiHistory){for(let lk in d.data.rssiHistory){if(!linkRssiHistory[lk])linkRssiHistory[lk]=[];d.data.rssiHistory[lk].forEach(p=>{if(!linkRssiHistory[lk].find(x=>Math.abs(x.time-p.t)<0.1))linkRssiHistory[lk].push({time:p.t,rssi:p.rssi});});if(linkRssiHistory[lk].length>120)linkRssiHistory[lk]=linkRssiHistory[lk].slice(-120);}updateRssiChart();}
       return;
     }
+    if(d.type==='cmd_ack'){
+      addLog('SYS','CMD_ACK',`0x${d.node.toString(16).toUpperCase()} 配置${d.status===0?'成功':'失败'} (status=${d.status})`,d.status===0?'#22c55e':'#ef4444');
+      return;
+    }
+        if(d.data && d.data.hbOnline){
+      let n=d.data.hbOnline.node;
+      addLog('SYS','ONLINE','0x'+n.toString(16).toUpperCase()+' is now online','#22c55e');
+    }
+    if(d.data && d.data.hbOffline){
+      let n=d.data.hbOffline.node;
+      addLog('SYS','OFFLINE','0x'+n.toString(16).toUpperCase()+' is OFFLINE','#ef4444');
+      let h=hex(n);
+      if(activeNodes[h] && h!=='PC' && h!=='0x10'){
+        delete activeNodes[h];
+        for(let lk in activeLinks){
+          if(activeLinks[lk].source===h || activeLinks[lk].target===h) delete activeLinks[lk];
+        }
+        renderTopo();
+      }
+    }
     if(d.type==='text_log'){
       // 仅在组网完成后显示串口文本日志
       if(networkReady){addLog('SYS','串口',d.text,'#0ea5e9');}

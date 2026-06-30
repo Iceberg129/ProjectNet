@@ -14,11 +14,11 @@ MSG_ACK_CONFIRM = 0x06
 MSG_JOIN_REQ = 0x20; MSG_JOIN_ACK = 0x21; MSG_JOIN_REJ = 0x22
 MSG_NAMES = {MSG_RREQ:"RREQ",MSG_RREP:"RREP",MSG_DATA:"DATA",MSG_ACK:"ACK",
              MSG_HEARTBEAT:"HB",MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",
-             MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
+             MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
              MSG_ACK_CONFIRM:"ACK_CFM"}
 MSG_ZH    = {MSG_RREQ:"路由发现",MSG_RREP:"路由应答",MSG_DATA:"数据传输",MSG_ACK:"确认应答",
              MSG_HEARTBEAT:"心跳",MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",
-             MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
+             MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
              MSG_ACK_CONFIRM:"ACK确认回执"}
 
 NODE_ROLES = {
@@ -50,6 +50,8 @@ class StatsTracker:
         self.current_route = None
         # 当前通信阶段
         self.current_phase = "idle"  # idle | rreq | rrep | data | ack
+        self._last_offline = None
+        self._last_online = None
         self.phase_updated = time.time()
         # ★ 通信成功率统计
         self.cycle_attempts = 0     # 尝试建立通信的总次数（周期结束时计入）
@@ -90,8 +92,12 @@ class StatsTracker:
         elif msg_type == MSG_DATA:      self.data += 1
         elif msg_type == MSG_ACK:       self.ack  += 1
         elif msg_type == MSG_ACK_CONFIRM: pass  # 不计入 ack 计数
+        elif msg_type == MSG_CMD:      pass  # 下行命令不计数
+        elif msg_type == MSG_CMD_ACK:  pass  # 命令应答不计数
         elif msg_type == MSG_JOIN_REQ:  pass  # 入网请求不计数主类型
-        elif msg_type == MSG_HEARTBEAT: pass
+        elif msg_type == MSG_JOIN_ACK:  pass  # 入网允许不计数
+        elif msg_type == MSG_JOIN_REJ:  pass  # 入网拒绝不计数
+        elif msg_type == MSG_HEARTBEAT:  self._handle_heartbeat(src, dest, count); pass
         else:                           self.bad  += 1
 
         # 链路 RSSI（从印章逐跳解析）
@@ -239,6 +245,13 @@ class StatsTracker:
         self.current_phase = f"{fail_phase}_fail"
         self.phase_updated = time.time()
 
+    def _handle_heartbeat(self, src, dest, count):
+        """Process HB alerts from mainTerm (count=0 online, count=0xFF offline)"""
+        if count == 0xFF:
+            self._last_offline = {"node": src, "time": time.time()}
+        elif count == 0:
+            self._last_online = {"node": src, "time": time.time()}
+
     def record_bad(self):
         self.bad += 1
 
@@ -304,6 +317,8 @@ class StatsTracker:
             "nodesSeen":   len(self.nodes_seen),
             "currentRoute": self.current_route,
             "currentPhase": self.current_phase,
+            "hbOnline": self._last_online,
+            "hbOffline": self._last_offline,
             "phaseUpdated": self.phase_updated,
             "linkRssi":    self.link_rssi,
             "nodeStats":   {f"0x{k:02X}": dict(v) for k, v in self.node_stats.items()},
