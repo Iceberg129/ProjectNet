@@ -15,10 +15,10 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 @keyframes countUp{from{transform:translateY(10px);opacity:0;}to{transform:translateY(0);opacity:1;}}
 @keyframes pulse{0%,100%{opacity:0.6;}50%{opacity:1;}}
 @keyframes slideIn{from{transform:translateX(20px);opacity:0;}to{transform:translateX(0);opacity:1;}}
+@keyframes logIn{from{transform:translateY(-22px);opacity:0;}to{transform:translateY(0);opacity:1;}}
 @keyframes panelIn{from{transform:translateX(100%);}to{transform:translateX(0);}}
 @keyframes particle{0%{stroke-dashoffset:100;}100%{stroke-dashoffset:0;}}
 .stat-change{animation:countUp .35s ease-out;}
-.log-entry{animation:slideIn .3s ease-out;}
 .btn-trans{transition:all .2s ease;}
 .btn-trans:hover{transform:translateY(-1px);}
 .custom-scroll::-webkit-scrollbar{width:4px;}
@@ -133,6 +133,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
   <div class="flex items-center justify-between px-4 py-1.5 border-b" style="border-color:var(--brd);">
     <span class="text-xs font-semibold uppercase tracking-wider" style="color:var(--mut);">📶 RSSI 趋势图</span>
     <div class="flex items-center gap-2">
+      <span id="rssi-age" class="text-[10px]" style="color:var(--mut);display:none;"></span>
       <select id="rssi-link-select" onchange="updateRssiChart()" class="text-xs rounded px-2 py-0.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
         <option value="">-- 选择链路 --</option>
       </select>
@@ -227,7 +228,15 @@ function makeTopoOption(){
               const isWired=p.data.source==='PC'||p.data.target==='PC';
               if(isWired)return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>🔌 USB 有线连接`;
               let r=p.data.rssi,rs=r!==null&&r!==undefined?r+' dBm':'未知';
-              return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>📶 RSSI: ${rs}`;
+              // ★ 查找链路对象获取 lastUpdated 和 broken 状态
+              const lkA=`${p.data.source}-${p.data.target}`,lkB=`${p.data.target}-${p.data.source}`;
+              const link=activeLinks[lkA]||activeLinks[lkB];
+              let extra='';
+              if(link){
+                if(link.broken)extra+=`<br/>⚠️ <span style="color:#ef4444;">链路不可达 (连续多次无 RSSI)</span>`;
+                if(link.lastUpdated)extra+=`<br/>🕐 最后更新: ${((Date.now()-link.lastUpdated)/1000).toFixed(0)}s 前`;
+              }
+              return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>📶 RSSI: ${rs}${extra}`;
             }
             let n=activeNodes[p.data.id];
             if(!n)return p.name;
@@ -251,30 +260,40 @@ function makeTopoOption(){
       data:Object.values(activeNodes).map(n=>{
         const pos=NODE_POS[n.id];
         const stale=n.stale===true;
+        const decId=parseInt(n.id,16);  // PC → NaN
+        const isPC=n.id==='PC';
+        // ★ 仅当前路由上的节点发光，未用到的中继不发光（PC 始终不受影响）
+        const onRoute=!stale&&currentRoute&&currentRoute.relays&&(
+          isPC||decId===0x30||decId===0x10||currentRoute.relays.includes(decId)
+        );
+        const hasRoute=currentRoute&&currentRoute.relays;
+        const dimmed=hasRoute&&!onRoute&&!isPC;  // 路由存在但此节点不在路径上且非 PC
         return{
           id:n.id,name:n.name+(stale?' [离线]':''),category:n.cat,symbolSize:n.size,
           x:pos?pos.x:undefined, y:pos?pos.y:undefined,
           fixed:!!pos,
-          itemStyle:{color:n.color,shadowBlur:stale?0:(n.id==='PC'?0:10),shadowColor:n.color,borderColor:n.color,borderWidth:n.id==='PC'?3:2,opacity:stale?0.35:1},
+          itemStyle:{color:n.color,shadowBlur:onRoute?12:0,shadowColor:onRoute?n.color:'transparent',borderColor:n.color,borderWidth:isPC?3:2,opacity:stale?0.35:1},
           label:{show:true,position:'bottom',distance:12,color:stale?'#64748b':'#cbd5e1',fontSize:11,formatter:p=>p.name}
         };
       }),
       links:Object.values(activeLinks).map(l=>{
         const isWired=(l.source==='PC'||l.target==='PC');
         const isRoute=l.inRoute;
+        const isBroken=l.broken===true;
         const routeColor=isRoute?rssiColor(l.rssi):null;
         return{
           source:l.source,target:l.target,
           rssi:l.rssi,  // ★ 传递给 tooltip 使用
+          broken:isBroken,  // ★ 传递给 tooltip 使用
           lineStyle:{
-            color:isRoute?routeColor:isWired?'#0ea5e9':rssiColor(l.rssi),
-            width:isRoute?3.5:isWired?2.5:1.2,
-            type:(isRoute||isWired)?'solid':'dashed',
-            opacity:isRoute?1:isWired?0.8:0.45,
-            shadowBlur:isRoute?14:0,
-            shadowColor:isRoute?routeColor:'transparent'
+            color:isBroken?'#ef4444':isRoute?routeColor:isWired?'#0ea5e9':rssiColor(l.rssi),
+            width:isBroken?0.8:isRoute?3.5:isWired?2.5:1.2,
+            type:isBroken?'dotted':(isRoute||isWired)?'solid':'dashed',
+            opacity:isBroken?0.25:isRoute?1:isWired?0.8:0.45,
+            shadowBlur:isRoute&&!isBroken?14:0,
+            shadowColor:isRoute&&!isBroken?routeColor:'transparent'
           },
-          label:{show:l.rssi!==null&&l.rssi!==undefined,formatter:l.rssi+' dBm',position:'middle',fontSize:10,color:'#94a3b8',backgroundColor:'rgba(11,17,32,0.85)',padding:[2,6],borderRadius:3}
+          label:{show:!isBroken&&l.rssi!==null&&l.rssi!==undefined,formatter:l.rssi+' dBm',position:'middle',fontSize:10,color:'#94a3b8',backgroundColor:'rgba(11,17,32,0.85)',padding:[2,6],borderRadius:3}
         };
       }),
       categories:[
@@ -350,11 +369,16 @@ function updateRssiChart(){
   const now=Date.now();
   const sel=document.getElementById('rssi-link-select');
   const selected=sel?sel.value:'';
-  if(!selected)return;  // 未选择时不显示
+  const ageEl=document.getElementById('rssi-age');
+  if(!selected){if(ageEl)ageEl.style.display='none';return;}
   const history=linkRssiHistory[selected];
-  if(!history||history.length<2)return;
+  if(!history||history.length<2){if(ageEl)ageEl.style.display='none';return;}
   let data=history.map(p=>[p.time*1000,p.rssi]).filter(p=>p[0]>now-120000&&p[1]!=null);
-  if(data.length<2)return;
+  if(data.length<2){if(ageEl)ageEl.style.display='none';return;}
+  // 最后数据点的时间
+  const lastT=data[data.length-1][0];
+  const age=((now-lastT)/1000).toFixed(0);
+  if(ageEl){ageEl.style.display='';ageEl.textContent=`${age}s 前`;}
   const color=rssiColor(data[data.length-1][1]);
   rssiChart.setOption({series:[{name:selected,type:'line',data:data,smooth:true,symbol:'none',
     lineStyle:{color:color,width:2},itemStyle:{color:color}}]},false);
@@ -374,9 +398,19 @@ const STAT_CARDS=[
   {key:'rrepCount',label:'RREP',icon:'📬',color:'#22d3ee'},
   {key:'dataCount',label:'DATA',icon:'📦',color:'#22c55e'},
   {key:'ackCount',label:'ACK',icon:'✅',color:'#eab308'},
+  {key:'successRate',label:'成功率',icon:'🎯',color:'#22c55e',suffix:'%'},
   {key:'avgRssi',label:'平均RSSI',icon:'📶',color:'#a78bfa',suffix:' dBm',rssi:true},
 ];
 let lastStats={};
+
+function animateCard(el, idx){
+  // ★ 逐级延迟动画：卡片从左到右依次滑入（50ms 间隔）
+  el.style.animationDelay = (idx * 0.05) + 's';
+  el.classList.remove('stat-change');
+  void el.offsetWidth;  // 强制重绘，使 animation 重新触发
+  el.classList.add('stat-change');
+  setTimeout(() => { el.style.animationDelay = ''; }, idx * 50 + 400);
+}
 
 function updateStats(s){
   if(!s)return;
@@ -388,12 +422,12 @@ function updateStats(s){
         <span class="text-xl">${c.icon}</span>
         <div>
           <div class="text-[10px] font-semibold uppercase tracking-wide" style="color:var(--mut);">${c.label}</div>
-          <div id="stat-${c.key}" class="text-lg font-bold stat-change" style="color:${c.color};">${initVal}</div>
+          <div id="stat-${c.key}" class="text-lg font-bold" style="color:${c.color};">${initVal}</div>
         </div>
       </div>`;
     }).join('');
   }
-  STAT_CARDS.forEach(c=>{
+  STAT_CARDS.forEach((c, idx)=>{
     const el=document.getElementById('stat-'+c.key);
     if(!el)return;
     let v=s[c.key];
@@ -402,20 +436,36 @@ function updateStats(s){
       if(v===null||v===undefined){
         if(lastStats[c.key]===null)return; // 无变化
         el.textContent='-- dBm';el.style.color=c.color;
-        el.classList.remove('stat-change');void el.offsetWidth;el.classList.add('stat-change');
+        animateCard(el, idx);
       }else{
         const old=lastStats[c.key];
         if(old!==v){
           el.textContent=v+' dBm';
           const rc=rssiColor(v);
           el.style.color=rc;
-          el.classList.remove('stat-change');void el.offsetWidth;el.classList.add('stat-change');
+          animateCard(el, idx);
         }else return;
       }
     }else{
-      const old=lastStats[c.key]??-1;v=v??0;
-      let t=c.suffix==='%'?v.toFixed(1)+'%':String(v);
-      if(old!==v){el.textContent=t;el.classList.remove('stat-change');void el.offsetWidth;el.classList.add('stat-change');}
+      const old=lastStats[c.key]??-1;
+      if(c.suffix==='%'){
+        // 成功率：null 表示尚无尝试，颜色随值变化
+        if(v===null||v===undefined){
+          if(lastStats[c.key]===null)return;
+          el.textContent='--%';el.style.color=c.color;
+          animateCard(el, idx);
+        }else{
+          if(old!==v){
+            el.textContent=v.toFixed(1)+'%';
+            el.style.color=v>=80?'#22c55e':v>=50?'#eab308':'#ef4444';
+            animateCard(el, idx);
+          }else return;
+        }
+      }else{
+        v=v??0;
+        let t=String(v);
+        if(old!==v){el.textContent=t;animateCard(el, idx);}
+      }
     }
   });
   lastStats={...s};
@@ -599,32 +649,55 @@ function applyRouteHighlight(relays){
 // ════════════════════ Tab 切换 ════════════════════
 function switchTab(tab,btn){
   selectedTab=tab;
+  // ★ 节点/链路面板：进入时启动每秒刷新，离开日志流时停止
+  if(tab==='log'){stopNodeDetailTimer();}
+  else{startNodeDetailTimer();if(tab==='node'&&selectedNodeHex)renderNodeDetail(selectedNodeHex);if(tab==='link')renderLinkStats();}
   document.querySelectorAll('.tab-btn').forEach(b=>{b.classList.remove('active');b.style.color='var(--mut)';});
   btn.classList.add('active');btn.style.color='var(--cyan)';
   document.getElementById('tab-log').style.display=tab==='log'?'flex':'none';
   document.getElementById('tab-node').classList.toggle('hidden',tab!=='node');
   document.getElementById('tab-link').classList.toggle('hidden',tab!=='link');
-  if(tab==='node'&&selectedNodeHex)renderNodeDetail(selectedNodeHex);
   if(tab==='link')renderLinkStats();
 }
 
 // ════════════════════ 节点详情 ════════════════════
+let nodeDetailTimer=null;  // 每秒自动刷新定时器
+
 function renderNodeDetail(nodeHex){
-  const n=activeNodes[nodeHex];if(!n)return;
+  const n=activeNodes[nodeHex];
   const empty=document.getElementById('node-detail-empty');
   const content=document.getElementById('node-detail-content');
+
+  // ★ 节点已被移除（离线超 25s）→ 显示离线状态
+  if(!n){
+    empty.classList.remove('hidden');content.classList.add('hidden');
+    empty.innerHTML=`<div class="text-center py-10" style="color:var(--mut);"><div class="text-4xl mb-3">🔌</div><p class="text-sm">节点 ${nodeHex} 已离线</p><p class="text-xs mt-1" style="color:var(--mut);">超过 25s 未收到数据，已从拓扑中移除</p></div>`;
+    return;
+  }
+
   empty.classList.add('hidden');content.classList.remove('hidden');
   const m=meta(n.decId||parseInt(nodeHex,16));
   const idle=n.lastSeen?((Date.now()-n.lastSeen)/1000).toFixed(0):-1;
+  const isOffline=n.stale===true;
+
+  // 状态行
+  let statusHtml;
+  if(n.id==='PC'){statusHtml='🖥 本地网关 · 始终在线';}
+  else if(n.id==='0x10'&&!isSerialOpen){statusHtml='⚠️ 串口未连接';}
+  else if(isOffline){statusHtml=`<span style="color:#ef4444;">🔌 已离线 · ${idle}s 无响应</span>`;}
+  else if(idle<0){statusHtml='⏳ 等待数据...';}
+  else{statusHtml=`🟢 活跃 · ${idle}s 前`;}
+
   // 找出涉及该节点的链路
   let nodeLinks=[];
   for(let lk in activeLinks){
     if(lk.includes(nodeHex))nodeLinks.push({key:lk,...activeLinks[lk]});
   }
+
   content.innerHTML=`
     <div class="flex items-center gap-3 mb-3">
-      <div class="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold" style="background:${n.color}22;border:2px solid ${n.color};color:${n.color};">${nodeHex}</div>
-      <div><div class="font-bold text-sm">${m.role} <span style="color:var(--mut);">${m.en}</span></div><div class="text-xs" style="color:var(--mut);">${n.id==='PC'?'🖥 本地网关 · 始终在线':n.id==='0x10'&&!isSerialOpen?'⚠️ 串口未连接':idle<0?'⏳ 等待数据...':'活跃: '+idle+'s 前'}</div></div>
+      <div class="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold" style="background:${n.color}22;border:2px solid ${isOffline?'#ef4444':n.color};color:${isOffline?'#ef4444':n.color};">${isOffline?'⚠':nodeHex}</div>
+      <div><div class="font-bold text-sm">${m.role} <span style="color:var(--mut);">${m.en}</span>${isOffline?' <span class="text-[10px] font-bold" style="color:#ef4444;">[离线]</span>':''}</div><div class="text-xs" style="color:var(--mut);">${statusHtml}</div></div>
     </div>
     <div class="grid grid-cols-2 gap-2">
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">ID (HEX)</div><div class="font-mono text-sm">${nodeHex}</div></div>
@@ -642,6 +715,17 @@ function renderNodeDetail(nodeHex){
   `;
 }
 
+function startNodeDetailTimer(){
+  stopNodeDetailTimer();
+  nodeDetailTimer=setInterval(()=>{
+    if(selectedTab==='node'&&selectedNodeHex)renderNodeDetail(selectedNodeHex);
+    if(selectedTab==='link')renderLinkStats();
+  },1000);
+}
+function stopNodeDetailTimer(){
+  if(nodeDetailTimer){clearInterval(nodeDetailTimer);nodeDetailTimer=null;}
+}
+
 // ════════════════════ 链路统计 ════════════════════
 function renderLinkStats(){
   const container=document.getElementById('link-stats-content');
@@ -649,21 +733,25 @@ function renderLinkStats(){
   if(links.length===0){container.innerHTML=`<p class="text-xs text-center py-6" style="color:var(--mut);">暂无链路数据</p>`;return;}
   container.innerHTML=links.map(([key,l])=>{
     const inRoute=l.inRoute;
+    const isBroken=l.broken===true;
     const isWired=(l.source==='PC'||l.target==='PC');
     let statusHtml, borderColor;
     const rc=inRoute?rssiColor(l.rssi):null;
-    if(inRoute){statusHtml=`<span class="text-[10px] font-bold" style="color:${rc};">⚡ 传输中</span>`;borderColor=rc;}
+    if(isBroken){statusHtml='<span class="text-[10px] font-bold" style="color:#ef4444;">⚠ 链路断开</span>';borderColor='#ef4444';}
+    else if(inRoute){statusHtml=`<span class="text-[10px] font-bold" style="color:${rc};">⚡ 传输中</span>`;borderColor=rc;}
     else if(isWired){statusHtml='<span class="text-[10px]" style="color:#0ea5e9;">🔌 USB 有线</span>';borderColor='#0ea5e9';}
     else{statusHtml='<span class="text-[10px]" style="color:var(--mut);">💤 闲置</span>';borderColor='var(--brd)';}
-    return`<div class="rounded-lg p-2.5 text-xs" style="background:var(--bg);border:1px solid ${borderColor};${inRoute?'box-shadow:0 0 8px '+rc+'44;':''}">
+    return`<div class="rounded-lg p-2.5 text-xs" style="background:var(--bg);border:1px solid ${borderColor};${inRoute?'box-shadow:0 0 8px '+rc+'44;':''}${isBroken?'opacity:0.7;':''}">
       <div class="flex items-center justify-between mb-1">
         <span class="font-mono font-bold">${key}</span>
         ${statusHtml}
       </div>
       <div class="flex items-center gap-3">
         ${isWired?'<span style="color:var(--mut);">USB 串口</span>':`<span>RSSI: <b style="color:${rssiColor(l.rssi)};">${l.rssi!==null&&l.rssi!==undefined?l.rssi+' dBm':'未知'}</b></span>`}
-        <span>状态: <span style="color:${inRoute?rc:isWired?'#0ea5e9':'var(--mut)'};">${inRoute?'高亮实线 · 传输中':isWired?'实线 · USB连接':'虚线 · 闲置'}</span></span>
+        <span>状态: <span style="color:${isBroken?'#ef4444':inRoute?rc:isWired?'#0ea5e9':'var(--mut)'};">${isBroken?'点线 · 链路不可达':inRoute?'高亮实线 · 传输中':isWired?'实线 · USB连接':'虚线 · 闲置'}</span></span>
       </div>
+      ${l.brokenMsg?`<div class="mt-1" style="color:#ef4444;">⚠ ${l.brokenMsg}</div>`:''}
+      ${l.lastUpdated?`<div class="mt-1" style="color:var(--mut);">🕐 最后更新: ${((Date.now()-l.lastUpdated)/1000).toFixed(0)}s 前</div>`:''}
     </div>`;
   }).join('');
 }
@@ -671,8 +759,12 @@ function renderLinkStats(){
 function updateLinkStatsIfActive(){if(selectedTab==='link')renderLinkStats();}
 
 // ════════════════════ 日志系统 ════════════════════
+let logSeq=0, lastLogSeq=-1;
+const LOG_CASCADE=10;       // 最多逐级动画的条目数
+const LOG_CASCADE_MS=45;    // 每级延迟 (ms)
+
 function addLog(type,title,detail,color){
-  logEntries.unshift({type,title,detail,color,time:Date.now()});
+  logEntries.unshift({type,title,detail,color,time:Date.now(),seq:logSeq++});
   if(logEntries.length>300)logEntries.length=300;
   renderLogs();
 }
@@ -680,16 +772,51 @@ function addLog(type,title,detail,color){
 function renderLogs(){
   const c=document.getElementById('log-container');if(!c)return;
   const filtered=logFilter==='all'?logEntries:logEntries.filter(e=>e.type===logFilter);
-  c.innerHTML=filtered.slice(0,120).map(e=>{
+  const visible=filtered.slice(0,120);
+
+  // ★ 过滤切换或首次渲染 → 全量静默重建
+  if(lastLogSeq<0){
+    c.innerHTML=visible.map((e,i)=>{
+      const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
+      return`<div class="rounded p-2 border" style="background:var(--bg);border-color:var(--brd);animation:none">
+        <div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-600 text-[9px]">${t}</span></div>
+        <div class="leading-relaxed text-[11px]">${e.detail}</div></div>`;
+    }).join('');
+    if(visible.length>0)lastLogSeq=visible[0].seq;
+    return;
+  }
+
+  // ★ 增量模式：只收集真正的新条目（seq > lastLogSeq），最多逐级动画 LOG_CASCADE 条
+  const fresh=[];
+  for(let i=0;i<Math.min(visible.length,LOG_CASCADE);i++){
+    if(visible[i].seq>lastLogSeq)fresh.push(visible[i]);else break;
+  }
+  if(fresh.length===0)return;  // 无新条目，不动 DOM
+  if(visible.length>0)lastLogSeq=visible[0].seq;
+
+  // 构建新条目 HTML（带逐级延迟的 logIn 动画）
+  const frag=document.createDocumentFragment();
+  fresh.forEach((e,i)=>{
+    const div=document.createElement('div');
+    div.className='rounded p-2 border';
+    div.style.background='var(--bg)';
+    div.style.borderColor='var(--brd)';
+    div.style.animation=`logIn .35s ease-out ${(i*LOG_CASCADE_MS/1000).toFixed(2)}s both`;
     const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
-    return`<div class="log-entry rounded p-2 border" style="background:var(--bg);border-color:var(--brd);">
-      <div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-600 text-[9px]">${t}</span></div>
-      <div class="leading-relaxed text-[11px]">${e.detail}</div></div>`;
-  }).join('');
+    div.innerHTML=`<div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-600 text-[9px]">${t}</span></div><div class="leading-relaxed text-[11px]">${e.detail}</div>`;
+    frag.appendChild(div);
+  });
+
+  // 插入顶部，不动已有条目
+  c.insertBefore(frag, c.firstChild);
+
+  // 裁剪溢出（>120 条）
+  while(c.children.length>120)c.removeChild(c.lastChild);
 }
 
 function setLogFilter(f,btn){
   logFilter=f;
+  lastLogSeq=-1;  // ★ 切换过滤器时重置，避免全部条目被视为新条目
   document.querySelectorAll('.filter-btn').forEach(b=>{b.classList.remove('active');b.style.borderColor='var(--brd)';b.style.color='var(--mut)';b.style.background='transparent';});
   btn.classList.add('active');
   const fc=f==='SYS'?'#22c55e':f==='RREQ'?'#f97316':f==='RREP'?'#22d3ee':f==='DATA'?'#22c55e':f==='ACK'?'#eab308':'var(--cyan)';
@@ -764,36 +891,28 @@ async function triggerSimulate(){
 // ════════════════════ 垃圾回收 + 老化标记 ════════════════════
 setInterval(()=>{
   let dirty=false;const now=Date.now();
-  const STALE_LINK_MS=15000;   // 链路 15s 未更新 → 移除（>10s 通信间隔）
-  const STALE_NODE_MS=12000;   // 节点 12s 无活动 → 半透明（>10s 间隔）
-  const REMOVE_NODE_MS=25000;  // 节点 25s 无活动 → 彻底删除（>2个周期）
+  const STALE_LINK_MS=30000;   // 链路 30s 未更新 → 安全兜底移除（后端逐链路追踪为主）
+  const REMOVE_NODE_MS=25000;  // 节点 25s 无活动 → 彻底删除（安全兜底）
 
   // 1. 移除过期链路（RSSI 不再更新 = 中继已不存在）
   for(let lk in activeLinks){
     if(lk==='PC-0x10')continue;
-    if(activeLinks[lk].lastUpdated && now-activeLinks[lk].lastUpdated>STALE_LINK_MS){
+    // broken 链路由后端管理生命周期，前端 GC 不主动删除
+    if(activeLinks[lk].lastUpdated && now-activeLinks[lk].lastUpdated>STALE_LINK_MS && !activeLinks[lk].broken){
       delete activeLinks[lk];delete linkRssiCache[lk];
       dirty=true;
     }
   }
 
-  // 2. 老化/删除过期节点（同步清理其链路）
+  // 2. 彻底删除过期节点（25s 无任何帧经过，安全兜底）
+  //    节点离线/半透明仅由后端 node_offline 事件控制，前端不做 12s 老化
   for(let id in activeNodes){
     if(id==='PC')continue;
     if(id==='0x10'&&isSerialOpen)continue;
-    const age=now-activeNodes[id].lastSeen;
-    if(age>REMOVE_NODE_MS){
+    if(now-activeNodes[id].lastSeen>REMOVE_NODE_MS){
       delete activeNodes[id];
       for(let lk in activeLinks){if(activeLinks[lk].source===id||activeLinks[lk].target===id){delete activeLinks[lk];delete linkRssiCache[lk];}}
       dirty=true;addLog('SYS','离线',`${id} 超时已移除`,'#ef4444');
-    }else if(age>STALE_NODE_MS){
-      if(!activeNodes[id].stale){
-        activeNodes[id].stale=true;dirty=true;
-        // 节点变离线 → 立即移除其所有链路
-        for(let lk in activeLinks){if(activeLinks[lk].source===id||activeLinks[lk].target===id){delete activeLinks[lk];delete linkRssiCache[lk];}}
-      }
-    }else{
-      if(activeNodes[id].stale){activeNodes[id].stale=false;dirty=true;}
     }
   }
   if(dirty){renderTopo();updateRssiChart();}
@@ -847,8 +966,45 @@ function connectWS(){
       for(let k in activeLinks)activeLinks[k].inRoute=false;
       const failPhase=d.phase||'ack';
       updatePhaseIndicator(failPhase+'_fail');
-      addLog(d.phase?d.phase.toUpperCase():'ACK','传输失败',`pathId=${d.pathId}: ${d.msg}`,'#ef4444');
+      const brief=d.type==='route_fail'?'ACK 重传耗尽':`${failPhase.toUpperCase()} 阶段超时`;
+      addLog('SYS','传输失败',`[${brief}] pathId=${d.pathId} — ${d.msg}`,'#ef4444');
       renderTopo();return;
+    }
+    // ★ 链路 RSSI 缺失追踪：容忍偶发丢失，多次连续失败才断开
+    if(d.type==='link_broken'){
+      const lk=d.linkKey;
+      if(activeLinks[lk]){activeLinks[lk].broken=true;activeLinks[lk].brokenMsg=d.msg;}
+      addLog('SYS','链路断开',d.msg,'#ef4444');
+      renderTopo();updateRssiChart();
+      return;
+    }
+    if(d.type==='link_retry'){
+      addLog('SYS','链路重试',d.msg,'#eab308');
+      // 重试期间保持链路线条，不清除
+      return;
+    }
+    if(d.type==='link_restored'){
+      const lk=d.linkKey;
+      if(activeLinks[lk]){activeLinks[lk].broken=false;delete activeLinks[lk].brokenMsg;}
+      addLog('SYS','链路恢复',d.msg,'#22c55e');
+      renderTopo();updateRssiChart();
+      return;
+    }
+    // ★ 后端 RREQ 周期对比离线检测：仅在所有链路均达失败阈值后才触发
+    if(d.type==='node_offline'){
+      const h=hex(d.nodeId);
+      if(activeNodes[h]&&!activeNodes[h].stale){
+        activeNodes[h].stale=true;
+        // 移除该节点的所有相关链路
+        for(let lk in activeLinks){
+          if(activeLinks[lk].source===h||activeLinks[lk].target===h){
+            delete activeLinks[lk];delete linkRssiCache[lk];
+          }
+        }
+        addLog('SYS','离线检测',`节点 ${d.nodeHex} (${d.role}) ${d.msg}`,'#ef4444');
+        renderTopo();updateRssiChart();
+      }
+      return;
     }
     if(d.type==='stats'){updateStats(d.data);
       // ★ 周期 stats 不触发路由高亮（高亮仅由 ACK_CONFIRM 触发）
@@ -889,7 +1045,7 @@ function connectWS(){
 
 // ════════════════════ 启动 ════════════════════
 connectWS();
-updateStats({totalFrames:0,rreqCount:0,rrepCount:0,dataCount:0,ackCount:0,avgRssi:null});
+updateStats({totalFrames:0,rreqCount:0,rrepCount:0,dataCount:0,ackCount:0,successRate:null,avgRssi:null});
 // 初始更新 RSSI 图
 setInterval(updateRssiChart,5000);
 </script>

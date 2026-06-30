@@ -51,6 +51,18 @@ class StatsTracker:
         # 当前通信阶段
         self.current_phase = "idle"  # idle | rreq | rrep | data | ack
         self.phase_updated = time.time()
+        # ★ 通信成功率统计
+        self.cycle_attempts = 0     # 尝试建立通信的总次数（周期结束时计入）
+        self.cycle_successes = 0    # 成功完成 ACK_CONFIRM 的次数
+        self._cycle_pending = False # 当前是否有未决的通信周期
+        # ★ RREQ 周期节点追踪（用于快速离线检测）
+        self._current_rreq_nodes = set()    # 本轮 RREQ 窗口中发现的节点
+        # ★ 逐链路 RSSI 失败追踪（容忍偶发丢失，连续多次失败才断开）
+        self._link_fail_count = {}          # link_key -> 连续未刷新次数
+        self._LINK_FAIL_THRESHOLD = 1       # 一个周期内 sender 已重试 3 次，周期末即可判定
+        self._current_rreq_links = set()    # 本轮 RREQ 中刷新了 RSSI 的链路
+        self._known_links = set()           # 历史上所有出现过 RSSI 的链路（作为比较基准）
+        self._pending_events = []           # 待广播的事件列表
 
     def _link_key(self, a: int, b: int) -> str:
         lo, hi = (a, b) if a < b else (b, a)
@@ -88,23 +100,60 @@ class StatsTracker:
             for s in stamps:
                 rid = int(s["id"], 16)
                 key = self._link_key(prev, rid)
+                # ★ 链路 RSSI 刷新 → 重置失败计数 + 加入已知链路
+                was_broken = self._link_fail_count.get(key, 0) >= self._LINK_FAIL_THRESHOLD
                 self.link_rssi[key] = s["rssi"]
                 self.rssi_history[key].append((now, s["rssi"]))
+                self._link_fail_count[key] = 0
+                self._known_links.add(key)
+                if was_broken:
+                    self._pending_events.append({
+                        "type": "link_restored",
+                        "linkKey": key,
+                        "msg": f"链路 {key} RSSI 已恢复"
+                    })
                 # 更新中继节点统计
                 self.nodes_seen.add(rid)
                 ns = self.node_stats[rid]
                 ns["lastSeen"] = now
                 if ns["firstSeen"] == 0:
                     ns["firstSeen"] = now
+                # ★ 记录本轮 RREQ 发现的中继（用于离线检测）
+                if msg_type == MSG_RREQ:
+                    self._current_rreq_nodes.add(rid)
+                    self._current_rreq_links.add(key)
                 prev = rid
-            # 最终跳 → dest
+            # 最终跳 → dest（也追踪链路，写入 _known_links 作为全量基准）
             if prev != dest:
                 key = self._link_key(prev, dest)
                 self.rssi_history[key].append((now, None))
+                self._known_links.add(key)
+                self._link_fail_count[key] = 0
+                if msg_type == MSG_RREQ:
+                    self._current_rreq_links.add(key)
+        # ★ 记录 RREQ 的源节点（sender）进入本轮集合
+        if msg_type == MSG_RREQ:
+            self._current_rreq_nodes.add(src)
 
-        # 更新路由信息
+        # 更新路由信息 + 从 relay 路径推导活跃链路
         if msg_type == MSG_RREP:
             self.current_route = {"pathId": path_id, "relays": relays, "updated": now}
+            # ★ 将 RREP 携带的 relay 路径链路也写入 _current_rreq_links
+            #   （防止主节点只转发直达 RREQ 导致 _current_rreq_links 为空）
+            if relays:
+                prev = src
+                for r in relays:
+                    key = self._link_key(prev, r)
+                    self._known_links.add(key)
+                    self._link_fail_count[key] = 0
+                    if self.current_phase == "rreq":
+                        self._current_rreq_links.add(key)
+                    prev = r
+                key = self._link_key(prev, dest)
+                self._known_links.add(key)
+                self._link_fail_count[key] = 0
+                if self.current_phase == "rreq":
+                    self._current_rreq_links.add(key)
 
         # 更新通信阶段
         if   msg_type == MSG_RREQ: self._set_phase("rreq", now)
@@ -114,11 +163,90 @@ class StatsTracker:
         elif msg_type == MSG_ACK_CONFIRM: self._set_phase("ack_done", now)
 
     def _set_phase(self, phase, now):
+        old_phase = self.current_phase
         self.current_phase = phase
         self.phase_updated = now
 
+        # ★ 新周期 RREQ 开始（非重试）→ 重置收集器
+        #    sender 重试时 old_phase=="rrep"，此时不重置，累积所有重试的 RREQ 数据
+        if phase == "rreq" and old_phase not in ("rreq", "rrep"):
+            self._cycle_pending = True
+            self._current_rreq_nodes = set()
+            self._current_rreq_links = set()
+
+        # ★ RREP 到达 → 早期预警（不递增 fail_count，最终判定在 ACK_CONFIRM）
+        #    sender 可能还会重试，_current_rreq_links 在本周期内持续累积
+        if phase == "rrep" and old_phase == "rreq":
+            if self._known_links:
+                missing = self._known_links - self._current_rreq_links
+                for lk in missing:
+                    if self._link_fail_count.get(lk, 0) == 0:
+                        self._pending_events.append({
+                            "type": "link_retry",
+                            "linkKey": lk,
+                            "msg": f"链路 {lk} 本轮暂未发现，sender 正在重试"
+                        })
+
+        # ★ ACK_CONFIRM → 周期结束，最终判定（sender 已耗尽重试，数据收集完整）
+        if phase == "ack_done":
+            self._finalize_cycle(success=True)
+            if self._known_links:
+                missing = self._known_links - self._current_rreq_links
+                for lk in missing:
+                    cnt = self._link_fail_count.get(lk, 0) + 1
+                    self._link_fail_count[lk] = cnt
+                    if cnt >= self._LINK_FAIL_THRESHOLD:
+                        self._pending_events.append({
+                            "type": "link_broken",
+                            "linkKey": lk,
+                            "missCount": cnt,
+                            "msg": f"链路 {lk} sender 多次重试仍未发现，判定不可达"
+                        })
+                    if cnt >= 5:
+                        self._known_links.discard(lk)
+
+                # ★ 节点离线判定
+                for nid in (0x21, 0x22, 0x30):
+                    node_hex = f"0x{nid:02X}"
+                    node_links = [l for l in self._known_links if node_hex in l]
+                    if not node_links:
+                        continue
+                    all_broken = all(
+                        self._link_fail_count.get(l, 0) >= self._LINK_FAIL_THRESHOLD
+                        for l in node_links
+                    )
+                    if all_broken:
+                        role = NODE_ROLES.get(nid, {}).get("role", "未知")
+                        self._pending_events.append({
+                            "type": "node_offline",
+                            "nodeId": nid,
+                            "nodeHex": node_hex,
+                            "role": role,
+                            "msg": f"所有链路({len(node_links)}条)均不可达，判定离线"
+                        })
+
+    def _finalize_cycle(self, success: bool):
+        """周期结束时调用：统一计入 attempts（和 successes）"""
+        if self._cycle_pending:
+            self.cycle_attempts += 1
+            if success:
+                self.cycle_successes += 1
+            self._cycle_pending = False
+
+    def mark_cycle_failed(self, fail_phase: str):
+        """外部（periodic_stats / simulate）调用的失败标记"""
+        self._finalize_cycle(success=False)
+        self.current_phase = f"{fail_phase}_fail"
+        self.phase_updated = time.time()
+
     def record_bad(self):
         self.bad += 1
+
+    def get_pending_events(self):
+        """取出并清空待广播的事件列表（离线检测等）"""
+        events = self._pending_events[:]
+        self._pending_events = []
+        return events
 
     @property
     def average_rssi(self):
@@ -127,6 +255,13 @@ class StatsTracker:
             return None
         vals = list(self.link_rssi.values())
         return round(sum(vals) / len(vals), 1)
+
+    @property
+    def success_rate(self):
+        """通信成功率：完整走完 4 阶段的次数 / 总建立通信次数"""
+        if self.cycle_attempts == 0:
+            return None
+        return round(self.cycle_successes / self.cycle_attempts * 100, 1)
 
     def get_rssi_history(self, link_key: str = None):
         """返回 RSSI 历史数据，用于前端折线图"""
@@ -163,6 +298,9 @@ class StatsTracker:
             "ackCount":    self.ack,
             "badFrames":   self.bad,
             "avgRssi":     self.average_rssi,
+            "successRate": self.success_rate,
+            "cycleAttempts": self.cycle_attempts,
+            "cycleSuccesses": self.cycle_successes,
             "nodesSeen":   len(self.nodes_seen),
             "currentRoute": self.current_route,
             "currentPhase": self.current_phase,
@@ -236,6 +374,7 @@ _TEXT_LOG_KEYWORDS = [
     "TOPO", "STATS", "ROUTE", "RSSI", "JOIN", "ERR", "WARN",
     "FAIL", "ERROR", "NET", "CFG", "NODE", "LINK", "PATH",
     "SEND", "RECV", "ACK", "DATA", "RREQ", "RREP",
+    "MISS", "RETRY",  # sender 缺失中继重试日志
 ]
 
 
@@ -294,6 +433,10 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                 if msg_type == MSG_DATA and count < 4:
                                     last_hop = to_int8(data_bytes[7])
                             stats.record_frame(src, dest, msg_type, path_id, count, stamps, relays)
+                            # ★ 广播由 record_frame 产生的待处理事件（如离线检测）
+                            for evt in stats.get_pending_events():
+                                asyncio.run_coroutine_threadsafe(
+                                    manager.broadcast(json.dumps(evt)), loop)
                             frame_msg = {
                                 "type":"frame","src":src,"dest":dest,"msgType":msg_type,
                                 "msgTypeName":MSG_NAMES.get(msg_type,"UNKN"),
@@ -377,6 +520,9 @@ async def simulate_traffic():
 
         def rec(src, dest, mtype, pid, cnt, stamps, relays):
             stats.record_frame(src, dest, mtype, pid, cnt, stamps, relays)
+            # ★ 广播由 record_frame 产生的待处理事件（如离线检测）
+            for evt in stats.get_pending_events():
+                bcast(evt)
 
         def stamps_hex(stamps):
             h = ""
@@ -522,6 +668,7 @@ async def simulate_traffic():
                 if ack_success:
                     await asyncio.sleep(0.05)
                     await _check_cancel()
+                    rec(0x30, 0x10, MSG_ACK_CONFIRM, pid, len(chosen), [], chosen)
                     cfm_hex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
                     bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_ACK_CONFIRM,
                            "msgTypeName":"ACK_CFM","pathId":pid,"count":len(chosen),
@@ -529,8 +676,7 @@ async def simulate_traffic():
                 else:
                     # ACK 重传全部耗尽 → 路由失效
                     stats.current_route = None
-                    stats.current_phase = "ack_fail"
-                    stats.phase_updated = time.time()
+                    stats.mark_cycle_failed("ack")
                     bcast({"type":"route_fail","pathId":pid,"relays":chosen,"msg":"ACK 重传耗尽，路由失效"})
 
             return {"status":"ok","msg":f"✅ 模拟 {len(choices)} 轮 AODV-Lite 通信完成（含 RSSI 漂移）","rounds":len(choices)}
@@ -555,6 +701,10 @@ async def periodic_stats():
         await asyncio.sleep(3)
         try: await manager.broadcast_stats()
         except Exception: pass
+        # ★ 广播待处理事件（如离线检测，兜底保障）
+        for evt in stats.get_pending_events():
+            try: await manager.broadcast(json.dumps(evt))
+            except Exception: pass
         # ★ 各阶段超时检测：卡在任何阶段过久均视作传输失败
         phase = stats.current_phase
         if phase in PHASE_TIMEOUTS:
@@ -570,7 +720,7 @@ async def periodic_stats():
                     "relays": route_info.get("relays", []),
                     "msg": f"{cn_name}({phase}) 阶段超时 — 传输失败"
                 }))
-                stats.current_phase = f"{phase}_fail"  # 保持告警状态，直到下轮 RREQ 重置
+                stats.mark_cycle_failed(phase)  # 计入失败 + 保持告警状态
                 stats.phase_updated = time.time()
 
 @app.on_event("startup")

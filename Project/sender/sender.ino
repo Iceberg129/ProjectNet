@@ -45,6 +45,11 @@ uint8_t  pathIdCounter = 0;
 uint8_t  sampleCounter = 0;
 bool     dataPending   = false;
 uint8_t  rreqRetryCount = 0;      // RREQ 当前路径重试计数
+// ★ 已知中继追踪：记住上一轮成功通信的中继，本轮若缺失则重试 RREQ
+uint8_t  knownRelays[MAX_RELAYS];
+uint8_t  knownRelayCount = 0;
+uint8_t  missingRetryCount = 0;
+const uint8_t MAX_MISSING_RETRIES = 2;  // 缺失中继最多重试 2 次
 
 enum DiscState { IDLE, WAITING_RREP, WAITING_ACK };
 DiscState discState    = IDLE;
@@ -86,6 +91,7 @@ void loop() {
     if (now - lastAction >= 10000) {
       lastAction = now;
       rreqRetryCount = 0;  // ★ 新周期开始，重置重试计数
+      missingRetryCount = 0;
 
       if (!route.valid || (now - route.timestamp > ROUTE_MAX_AGE)) {
         Serial.print(F("\n->RREQ #"));
@@ -209,7 +215,7 @@ void handleRREPFrame(LoRaFrame* frame) {
     Serial.println(F(" accept"));
   }
 
-  rreqRetryCount = 0;  // ★ RREP 成功收到，重置重试计数
+  rreqRetryCount = 0;  // ★ RREP 成功收到，重置超时重试计数
 
   route.destId     = frame->srcId;
   route.relayCount = frame->count;
@@ -220,6 +226,35 @@ void handleRREPFrame(LoRaFrame* frame) {
   route.valid      = true;
 
   int rssi = LoRa.packetRssi();
+
+  // ★ 检查已知中继是否缺失：若上一轮有中继本轮 RREP 路径中未出现，重试 RREQ
+  //    dataPending 为 true 时才重试（false 表示已决定发 DATA，不再因延迟 RREP 重复触发）
+  if (dataPending && knownRelayCount > 0 && missingRetryCount < MAX_MISSING_RETRIES) {
+    bool relayMissing = false;
+    for (uint8_t i = 0; i < knownRelayCount; i++) {
+      bool found = false;
+      for (uint8_t j = 0; j < route.relayCount; j++) {
+        if (route.relays[j] == knownRelays[i]) { found = true; break; }
+      }
+      if (!found) {
+        Serial.print(F("Missing relay 0x"));
+        Serial.print(knownRelays[i], HEX);
+        Serial.print(F(" retry #"));
+        Serial.println(missingRetryCount + 1, DEC);
+        relayMissing = true;
+        break;
+      }
+    }
+    if (relayMissing) {
+      missingRetryCount++;
+      route.valid = false;  // 暂不使用此路径
+      delay(20 + missingRetryCount * 30);  // 快速退避: 50ms, 80ms
+      sendRREQ();
+      return;  // ★ 不发送 DATA，等待新 RREP
+    }
+  }
+
+  missingRetryCount = 0;  // ★ 所有已知中继到位（或重试耗尽），重置
 
   // ★ 先发 DATA（等待 relay 完成 RREP 转发，时间按中继数递增）
   // 1跳 relay=10ms退避+50ms TX ≈60ms; 2跳 relay=70ms退避+50ms TX ≈120ms
@@ -289,12 +324,17 @@ void handleACKFrame(LoRaFrame* frame) {
   LoRa.write((uint8_t*)&confirm, FRAME_SIZE);
   LoRa.endPacket();
 
+  // ★ 通信成功 → 更新已知中继列表（供下轮缺失检测用）
+  knownRelayCount = route.relayCount;
+  memcpy(knownRelays, route.relays, knownRelayCount);
+
   // 再打印日志（不阻塞 ACK_CONFIRM）
   Serial.print(F("ACK ok pid="));
   Serial.print(frame->pathId, DEC);
   Serial.print(F(" r="));
   Serial.print(rssi, DEC);
-  Serial.println(F(" v"));
+  Serial.print(F(" v relays="));
+  Serial.println(knownRelayCount, DEC);
 }
 
 // =============================================
