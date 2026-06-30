@@ -7,7 +7,7 @@
 #include <LoRa.h>
 
 // ---------- 节点身份（烧录时修改） ----------
-const uint8_t MY_NODE_ID = 0x21;       // 中继节点 ID
+const uint8_t MY_NODE_ID = 0x22;       // 中继节点 ID
 
 // ---------- 协议常量 ----------
 const uint8_t FRAME_HEADER_0 = 0x4C;
@@ -23,6 +23,8 @@ const uint8_t MSG_JOIN_REJ = 0x22;
 const uint8_t MSG_CMD = 0x04;
 const uint8_t MSG_CMD_ACK = 0x05;
 const uint8_t MSG_HB       = 0x03;   // heartbeat
+const uint8_t MSG_KICK     = 0x08;   // 踢出命令
+const uint8_t MSG_UNKICK   = 0x09;   // 恢复命令
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t MAX_STAMPS     = 4;      // 最多 4 对 {id, rssi} = 8 字节
 const uint8_t FRAME_SIZE     = 16;
@@ -90,10 +92,12 @@ void markForwarded(uint8_t srcId, uint8_t destId, uint8_t pathId, uint8_t msgTyp
   fwdHistIdx = (fwdHistIdx + 1) % FWD_HISTORY;
 }
 
+bool gKicked = false;  // ★ 踢出标志
+
 // =============================================
 void setup() {
 
-  // LoRa.setPins(A3);
+  LoRa.setPins(A3);
   Serial.begin(9600);
   while (!Serial);
 
@@ -116,15 +120,16 @@ void setup() {
 // =============================================
 void loop() {
   static uint32_t lastCheck = 0;
+  if (millis() - lastCheck >= 5) {
+    lastCheck = millis();
+    handlePacket();  // ★ 即使 KICKED 也继续监听，等待 UNKICK
+  }
+  if (gKicked) { return; }  // 静默：不转发不发送（但仍监听 UNKICK，已在上方 handlePacket 处理）
   // Heartbeat: 10s +/- 2s jitter
   if (millis() - lastHbTime >= hbInterval) {
     sendHeartbeat();
     lastHbTime = millis();
     hbInterval = 8000 + random(4000);
-  }
-  if (millis() - lastCheck >= 5) {
-    lastCheck = millis();
-    handlePacket();
   }
 
   // ★ 非阻塞发送：检查所有 pending 转发
@@ -261,6 +266,23 @@ void handlePacket() {
   LoRa.readBytes((uint8_t*)&rxFrame, FRAME_SIZE);
 
   int rssi = LoRa.packetRssi();
+
+  // ★ MSG_KICK / MSG_UNKICK 即使 destId=自己也要处理
+  if (rxFrame.msgType == MSG_KICK && rxFrame.destId == MY_NODE_ID) {
+    gKicked = true;
+    Serial.print(F("KICKED by mainTerm r="));
+    Serial.println(rssi, DEC);
+    return;
+  }
+  if (rxFrame.msgType == MSG_UNKICK && rxFrame.destId == MY_NODE_ID) {
+    if (gKicked) {
+      gKicked = false;
+      Serial.print(F("UNKICKED — resumed r="));
+      Serial.println(rssi, DEC);
+    }
+    return;
+  }
+
   bool ignore = false;
   const char* reason = "";
 

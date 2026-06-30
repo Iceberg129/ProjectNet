@@ -53,6 +53,8 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
     <button id="btn-simulate" onclick="triggerSimulate()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md text-white" style="background:var(--purple);">🧪 模拟</button>
     <button id="btn-autodemo" onclick="toggleAutoDemo()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">▶ 自动演示</button>
     <button onclick="showChannelPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">⚙️ 信道</button>
+    <button onclick="showWhitelistPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📋 白名单</button>
+    <button id="btn-reset" onclick="resetAll()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:#ef4444;">🗑️ 清除</button>
     <div class="w-px h-5" style="background:var(--brd);"></div>
     <div id="ws-dot" class="w-2.5 h-2.5 rounded-full" style="background:var(--red);box-shadow:0 0 8px var(--red);"></div>
     <span id="ws-label" class="text-xs font-mono" style="color:var(--mut);">离线</span>
@@ -166,9 +168,44 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
   </div>
 </div>
 
+<!-- ════════════ WHITELIST PANEL ════════════ -->
+<div id="whitelist-panel" class="fixed right-0 top-0 h-full w-80 z-50 shadow-2xl flex flex-col" style="background:var(--card);border-left:1px solid var(--brd);transform:translateX(100%);transition:transform .3s ease;display:none;">
+  <div class="flex items-center justify-between px-4 py-3 border-b flex-shrink-0" style="border-color:var(--brd);">
+    <h3 class="font-bold" style="color:var(--green);">📋 白名单管理</h3>
+    <button onclick="hideWhitelistPanel()" class="text-xl leading-none" style="color:var(--mut);">&times;</button>
+  </div>
+  <div class="p-4 space-y-3 flex-shrink-0 border-b" style="border-color:var(--brd);">
+    <p class="text-xs" style="color:var(--mut);">仅白名单中的节点可入网。踢出后节点静默，可恢复。添加/踢出/恢复均自动刷新。</p>
+    <!-- 添加节点 -->
+    <div class="flex gap-2 items-end">
+      <div class="flex-1">
+        <label class="text-xs font-semibold block mb-0.5" style="color:var(--mut);">节点 ID</label>
+        <input id="wl-add-id" type="text" placeholder="0x30" class="w-full rounded-md px-2 py-1.5 text-sm outline-none font-mono" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+      </div>
+      <div class="flex-1">
+        <label class="text-xs font-semibold block mb-0.5" style="color:var(--mut);">角色</label>
+        <select id="wl-add-role" class="w-full rounded-md px-2 py-1.5 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+          <option value="1">中继 relay</option>
+          <option value="2" selected>终端 sender</option>
+        </select>
+      </div>
+      <button onclick="wlAddNode()" class="btn-trans text-sm font-bold px-3 py-1.5 rounded-md text-white flex-shrink-0" style="background:var(--green);">➕ 添加</button>
+    </div>
+  </div>
+  <!-- 状态提示栏 -->
+  <div id="wl-status-bar" class="px-4 py-1.5 text-xs text-center flex-shrink-0" style="display:none;background:var(--bg);border-bottom:1px solid var(--brd);"></div>
+  <!-- 白名单列表 -->
+  <div class="flex-1 overflow-y-auto custom-scroll p-4 space-y-2" id="wl-list">
+    <p class="text-xs text-center" style="color:var(--mut);">打开面板自动读取，或点击下方按钮</p>
+  </div>
+  <div class="p-3 border-t flex-shrink-0" style="border-color:var(--brd);">
+    <button onclick="wlRefresh()" id="wl-refresh-btn" class="w-full py-2 rounded-md text-sm font-bold text-white btn-trans" style="background:var(--blue);">🔄 读取白名单 (WL?)</button>
+  </div>
+</div>
+
 <script>
 // ════════════════════ 常量 ════════════════════
-const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_ACK_CONFIRM=0x06,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22;
+const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_ACK_CONFIRM=0x06,MSG_KICK=0x08,MSG_UNKICK=0x09,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22;
 const MSG_META={
   [MSG_RREQ]:['RREQ','路由发现','#f97316'],
   [MSG_RREP]:['RREP','路由应答','#22d3ee'],
@@ -178,6 +215,8 @@ const MSG_META={
   [MSG_CMD]:['CMD','下行命令','#f59e0b'],
   [MSG_CMD_ACK]:['CMD_OK','命令应答','#10b981'],
   [MSG_ACK_CONFIRM]:['ACK_CFM','ACK确认回执','#10b981'],
+  [MSG_KICK]:['KICK','踢出命令','#ef4444'],
+  [MSG_UNKICK]:['UNKICK','恢复命令','#22c55e'],
   [MSG_JOIN]:['JOIN','入网请求','#ec4899'],
   [MSG_JOIN_OK]:['JOIN_OK','入网允许','#22c55e'],
   [MSG_JOIN_NO]:['JOIN_NO','入网拒绝','#ef4444'],
@@ -227,16 +266,20 @@ function makeTopoOption(){
             if(p.dataType==='edge'){
               const isWired=p.data.source==='PC'||p.data.target==='PC';
               if(isWired)return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>🔌 USB 有线连接`;
-              let r=p.data.rssi,rs=r!==null&&r!==undefined?r+' dBm':'未知';
+              let r=p.data.rssi;
               // ★ 查找链路对象获取 lastUpdated 和 broken 状态
               const lkA=`${p.data.source}-${p.data.target}`,lkB=`${p.data.target}-${p.data.source}`;
               const link=activeLinks[lkA]||activeLinks[lkB];
               let extra='';
-              if(link){
-                if(link.broken)extra+=`<br/>⚠️ <span style="color:#ef4444;">链路不可达 (连续多次无 RSSI)</span>`;
-                if(link.lastUpdated)extra+=`<br/>🕐 最后更新: ${((Date.now()-link.lastUpdated)/1000).toFixed(0)}s 前`;
+              let rssiDisplay='';
+              if(link&&link.broken){
+                rssiDisplay='<span style="color:#ef4444;">--</span>';
+                extra+=`<br/>⚠️ <span style="color:#ef4444;">链路不可达 (连续多次无 RSSI)</span>`;
+              }else{
+                rssiDisplay=r!==null&&r!==undefined?r+' dBm':'未知';
               }
-              return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>📶 RSSI: ${rs}${extra}`;
+              if(link&&link.lastUpdated)extra+=`<br/>🕐 最后更新: ${((Date.now()-link.lastUpdated)/1000).toFixed(0)}s 前`;
+              return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>📶 RSSI: ${rssiDisplay}${extra}`;
             }
             let n=activeNodes[p.data.id];
             if(!n)return p.name;
@@ -706,11 +749,15 @@ function renderNodeDetail(nodeHex){
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">最后活跃</div><div class="text-sm">${n.id==='PC'?'始终在线':n.id==='0x10'&&!isSerialOpen?'未连接':idle<0?'暂无数据':idle+'s 前'}</div></div>
     </div>
     <div class="text-xs font-bold mt-2" style="color:var(--mut);">相关链路 (${nodeLinks.length})</div>
-    ${nodeLinks.map(l=>`
-      <div class="flex items-center justify-between rounded p-2 text-xs" style="background:var(--bg);">
-        <span class="font-mono">${l.key}</span>
-        <span style="color:${rssiColor(l.rssi)};">${l.rssi!==null&&l.rssi!==undefined?l.rssi+' dBm':'--'}</span>
-      </div>`).join('')}
+    ${nodeLinks.map(l=>{
+      const age=l.lastUpdated?((Date.now()-l.lastUpdated)/1000).toFixed(0):-1;
+      const ageStr=age<0?'--':age+'s 前';
+      return`
+      <div class="flex items-center rounded p-2 text-xs gap-2" style="background:var(--bg);">
+        <span class="font-mono flex-shrink-0">${l.key}</span>
+        <span class="flex-1 text-right" style="color:var(--mut);font-size:9px;">${ageStr}</span>
+        <span style="color:${l.broken?'#ef4444':rssiColor(l.rssi)};min-width:52px;text-align:right;">${l.broken?'--':l.rssi!==null&&l.rssi!==undefined?l.rssi+' dBm':'--'}</span>
+      </div>`}).join('')}
     <button onclick="switchTab('log',document.querySelector('[data-tab=log]'))" class="w-full mt-2 py-1.5 rounded text-xs font-bold btn-trans" style="background:var(--brd);color:var(--txt);">返回日志流</button>
   `;
 }
@@ -836,7 +883,121 @@ function sendChannelConfig(){
   hideChannelPanel();
 }
 
-// ════════════════════ 自动演示 ════════════════════
+// ════════════════════ 白名单面板 ════════════════════
+function showWhitelistPanel(){const p=document.getElementById('whitelist-panel');p.style.display='flex';requestAnimationFrame(()=>{p.style.transform='translateX(0)';});wlRefresh();}
+function hideWhitelistPanel(){const p=document.getElementById('whitelist-panel');p.style.transform='translateX(100%)';setTimeout(()=>{p.style.display='none';},300);}
+function wlSend(cmd){
+  if(!globalWs||globalWs.readyState!==1){addLog('SYS','白名单','❌ WebSocket 未连接','#ef4444');return;}
+  globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
+}
+// ★ 白名单临时存储（wl_entry 事件填充，wl_end 渲染）
+let _wlEntries=[];
+let _wlKicked=new Set();  // ★ 被踢出的节点 ID 集合
+let _wlRefreshTimer=null;  // ★ WL? 防抖计时器
+function wlRefresh(){
+  // ★ 防抖：500ms 内重复调用只执行最后一次
+  if(_wlRefreshTimer){clearTimeout(_wlRefreshTimer);}
+  _wlRefreshTimer=setTimeout(function(){
+    _wlRefreshTimer=null;
+    _wlEntries=[];
+    _wlKicked=new Set();
+    document.getElementById('wl-list').innerHTML='<p class="text-xs text-center" style="color:var(--mut);">⏳ 查询中...</p>';
+    _showWlStatus('⏳ 正在读取白名单...', 'info');
+    wlSend('WL?');
+  }, 300);
+}
+function wlAddNode(){
+  const idRaw=document.getElementById('wl-add-id').value.trim();
+  if(!idRaw){addLog('SYS','白名单','❌ 请输入节点 ID','#ef4444');return;}
+  let id=parseInt(idRaw,16);
+  if(isNaN(id)||id<1||id>255){addLog('SYS','白名单','❌ 无效 ID (1-FF)','#ef4444');return;}
+  const role=document.getElementById('wl-add-role').value;
+  const idHex='0x'+id.toString(16).toUpperCase();
+  addLog('SYS','白名单',`📝 添加: ${idHex} role=${role==='1'?'relay':'sender'}`,'#22c55e');
+  wlSend(`WL+${idHex}:${role}`);
+  _showWlStatus('✅ 已添加 ' + idHex + '，正在刷新...', 'success');
+  setTimeout(function(){ wlRefresh(); }, 1500);
+}
+function wlKickNode(idHex){
+  if(!confirm('确定踢出节点 ' + idHex + ' 吗？\n该节点将被静默，可通过「恢复」按钮重新激活。'))return;
+  _showWlStatus('⏳ 正在踢出 ' + idHex + ' ...', 'warning');
+  addLog('SYS','踢出','🚫 踢出节点 ' + idHex + '...','#ef4444');
+  wlSend('KICK:' + idHex);
+  setTimeout(function(){
+    _showWlStatus('✅ 已发送踢出命令，等待确认后自动刷新...', 'success');
+    wlRefresh();
+  }, 2000);
+}
+function wlUnkickNode(idHex){
+  _showWlStatus('⏳ 正在恢复 ' + idHex + ' ...', 'info');
+  addLog('SYS','恢复','🔄 恢复节点 ' + idHex + '...','#22c55e');
+  wlSend('UNKICK:' + idHex);
+  setTimeout(function(){
+    _showWlStatus('✅ 已发送恢复命令，等待确认后自动刷新...', 'success');
+    wlRefresh();
+  }, 2000);
+}
+
+// ★ 白名单状态提示栏
+function _showWlStatus(msg, type){
+  var bar = document.getElementById('wl-status-bar');
+  if(!bar) return;
+  var colors = {info: '#3b82f6', warning: '#f59e0b', success: '#22c55e', error: '#ef4444'};
+  bar.textContent = msg;
+  bar.style.color = colors[type] || '#cbd5e1';
+  bar.style.display = 'block';
+  clearTimeout(window._wlStatusTimer);
+  window._wlStatusTimer = setTimeout(function(){ bar.style.display = 'none'; }, 5000);
+}
+
+function wlRender(){
+  var list = document.getElementById('wl-list');
+  if(_wlEntries.length===0){
+    list.innerHTML='<p class="text-xs text-center" style="color:var(--mut);">白名单为空</p>';
+    return;
+  }
+  var normal = _wlEntries.filter(function(e){ return !e.kicked; });
+  var kicked = _wlEntries.filter(function(e){ return e.kicked; });
+  var html='';
+
+  if(normal.length > 0){
+    html += '<div class="text-xs font-bold mb-2 flex items-center gap-1.5" style="color:var(--green);"><span>✅</span> 正常节点 (' + normal.length + ')</div>';
+    normal.forEach(function(e){
+      var idHex = '0x' + e.nodeId.toString(16).toUpperCase();
+      var roleName = e.role===1 ? '中继 relay' : '终端 sender';
+      var roleColor = e.role===1 ? '#22d3ee' : '#a78bfa';
+      html += '<div id="wl-item-' + e.nodeId.toString(16).toUpperCase() + '" class="flex items-center justify-between rounded-md px-3 py-2" style="background:var(--bg);border:1px solid var(--brd);">'
+        + '<div><span class="font-mono text-sm font-bold">' + idHex + '</span>'
+        + '<span class="text-xs ml-2 px-1.5 py-0.5 rounded" style="color:' + roleColor + ';background:' + roleColor + '18;">' + roleName + '</span></div>'
+        + '<div class="flex gap-1">'
+        + '<button onclick="wlKickNode(\'' + idHex + '\')" class="btn-trans text-xs px-2 py-1 rounded" style="color:#f59e0b;border:1px solid #f59e0b;" title="通过LoRa踢出在线节点">🚫 踢出</button>'
+        + '</div></div>';
+    });
+  }
+
+  if(kicked.length > 0){
+    html += '<div class="text-xs font-bold mb-2 mt-3 flex items-center gap-1.5" style="color:var(--red);"><span>🚫</span> 已踢出节点 (' + kicked.length + ')</div>';
+    kicked.forEach(function(e){
+      var idHex = '0x' + e.nodeId.toString(16).toUpperCase();
+      var roleName = e.role===1 ? '中继 relay' : '终端 sender';
+      var roleColor = e.role===1 ? '#22d3ee' : '#a78bfa';
+      html += '<div id="wl-item-' + e.nodeId.toString(16).toUpperCase() + '" class="flex items-center justify-between rounded-md px-3 py-2" style="background:var(--bg);border:1px solid #ef4444;opacity:0.75;">'
+        + '<div><span class="font-mono text-sm font-bold" style="color:var(--mut);">' + idHex + '</span>'
+        + '<span class="text-xs ml-2 px-1.5 py-0.5 rounded" style="color:' + roleColor + ';background:' + roleColor + '18;">' + roleName + '</span>'
+        + '<span class="text-[10px] ml-1.5 font-bold" style="color:#ef4444;">已踢出</span></div>'
+        + '<div class="flex gap-1">'
+        + '<button onclick="wlUnkickNode(\'' + idHex + '\')" class="btn-trans text-xs px-2 py-1 rounded" style="color:var(--green);border:1px solid var(--green);" title="恢复被踢节点">🔄 恢复</button>'
+        + '</div></div>';
+    });
+  }
+
+  html += '<p class="text-xs text-center mt-2" style="color:var(--mut);">共 ' + _wlEntries.length + ' 个节点</p>';
+  list.innerHTML = html;
+  _showWlStatus('✅ 白名单已刷新（' + _wlEntries.length + ' 个节点）', 'success');
+}
+
+
+
 let simulating=false;
 
 function toggleAutoDemo(){
@@ -860,6 +1021,35 @@ async function stopSimulate(){
   simulating=false;
   const btn=document.getElementById('btn-simulate');
   btn.innerHTML='🧪 模拟';btn.style.background='var(--purple)';
+}
+
+function clearFrontendState(){
+  // 停止模拟 & 自动演示
+  if(simulating){fetch('/api/stop_simulate').catch(()=>{});simulating=false;
+    const simBtn=document.getElementById('btn-simulate');simBtn.innerHTML='🧪 模拟';simBtn.style.background='var(--purple)';}
+  if(autoDemoId){clearInterval(autoDemoId);autoDemoId=null;
+    const demoBtn=document.getElementById('btn-autodemo');demoBtn.innerHTML='▶ 自动演示';demoBtn.style.background='var(--card)';demoBtn.style.color='var(--txt)';demoBtn.style.border='1px solid var(--brd)';}
+  // 重置节点 → 仅保留 PC
+  activeNodes={'PC':{id:'PC',name:'PC 网关',cat:4,size:65,color:'#0ea5e9',lastSeen:Date.now(),decId:0}};
+  activeLinks={};linkRssiCache={};linkRssiHistory={};currentRoute=null;
+  joinedNodeSet=new Set();networkReady=false;
+  // 重置统计 & 阶段
+  lastStats={};lastPhase=null;phaseStartTime=Date.now();
+  updateStats({totalFrames:0,rreqCount:0,rrepCount:0,dataCount:0,ackCount:0,successRate:null,avgRssi:null});
+  document.querySelectorAll('.phase-step').forEach((el,i)=>{
+    const circle=el.querySelector('div:first-child'),label=el.querySelector('span');
+    circle.style.background='transparent';circle.style.borderColor='var(--brd)';circle.style.color='var(--mut)';circle.textContent=String(i+1);circle.classList.remove('phase-active');label.style.color='var(--mut)';});
+  // 清空日志
+  logEntries=[];logSeq=0;lastLogSeq=-1;
+  const logContainer=document.getElementById('log-container');if(logContainer)logContainer.innerHTML='';
+  // 重渲染
+  renderTopo();updateRssiChart();
+}
+
+async function resetAll(){
+  clearFrontendState();
+  try{await fetch('/api/reset_stats');}catch(e){}
+  addLog('SYS','刷新','页面已重置，所有状态已清除','#22c55e');
 }
 
 async function triggerSimulate(){
@@ -935,10 +1125,8 @@ function toggleSerial(){
   }else{
     globalWs.send(JSON.stringify({action:'close_serial'}));
     btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;
-    // 移除主节点及相关链路
-    delete activeNodes['0x10'];
-    for(let lk in activeLinks){if(activeLinks[lk].source==='0x10'||activeLinks[lk].target==='0x10')delete activeLinks[lk];}
-    addLog('SYS','串口','串口已关闭','#eab308');renderTopo();
+    clearFrontendState();
+    addLog('SYS','串口','串口已关闭，所有节点已离线','#eab308');
   }
 }
 
@@ -960,7 +1148,8 @@ function connectWS(){
   globalWs.onmessage=(ev)=>{
     const d=JSON.parse(ev.data);
     if(d.type==='sys'){addLog('SYS','系统',d.msg,'#22c55e');return;}
-    if(d.type==='sys_error'){addLog('SYS','错误',d.msg,'#ef4444');const btn=document.getElementById('btn-serial');btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;return;}
+    if(d.type==='sys_error'){addLog('SYS','错误',d.msg,'#ef4444');const btn=document.getElementById('btn-serial');btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;
+      clearFrontendState();return;}
     if(d.type==='route_fail'||d.type==='phase_timeout'){
       currentRoute=null;
       for(let k in activeLinks)activeLinks[k].inRoute=false;
@@ -971,16 +1160,18 @@ function connectWS(){
       renderTopo();return;
     }
     // ★ 链路 RSSI 缺失追踪：容忍偶发丢失，多次连续失败才断开
-    if(d.type==='link_broken'){
+    if(d.type==='link_broken' || d.type==='link_retry'){
       const lk=d.linkKey;
-      if(activeLinks[lk]){activeLinks[lk].broken=true;activeLinks[lk].brokenMsg=d.msg;}
-      addLog('SYS','链路断开',d.msg,'#ef4444');
-      renderTopo();updateRssiChart();
-      return;
-    }
-    if(d.type==='link_retry'){
-      addLog('SYS','链路重试',d.msg,'#eab308');
-      // 重试期间保持链路线条，不清除
+      // ★ 跳过已踢出节点的链路事件（后端已清理，此检查作为防御）
+      const [n1,n2]=lk.split('-');
+      if(n1&&n2&&(_wlKicked.has(parseInt(n1,16))||_wlKicked.has(parseInt(n2,16)))) return;
+      if(d.type==='link_broken'){
+        if(activeLinks[lk]){activeLinks[lk].broken=true;activeLinks[lk].brokenMsg=d.msg;}
+        addLog('SYS','链路断开',d.msg,'#ef4444');
+        renderTopo();updateRssiChart();
+      }else{
+        addLog('SYS','链路重试',d.msg,'#eab308');
+      }
       return;
     }
     if(d.type==='link_restored'){
@@ -992,6 +1183,8 @@ function connectWS(){
     }
     // ★ 后端 RREQ 周期对比离线检测：仅在所有链路均达失败阈值后才触发
     if(d.type==='node_offline'){
+      // ★ 跳过已踢出节点（后端已清理链路，此检查作为防御）
+      if(_wlKicked.has(d.nodeId)) return;
       const h=hex(d.nodeId);
       if(activeNodes[h]&&!activeNodes[h].stale){
         activeNodes[h].stale=true;
@@ -1032,6 +1225,60 @@ function connectWS(){
         }
         renderTopo();
       }
+    }
+    if(d.type==='wl_entry'){
+      _wlEntries.push({nodeId:d.nodeId,role:d.role,kicked:!!d.kicked});
+      if(d.kicked) _wlKicked.add(d.nodeId);
+      else _wlKicked.delete(d.nodeId);
+      return;
+    }
+    if(d.type==='wl_end'){
+      // ★ 校验条目完整性：expectedCount 与实际条目数比对，不完整则自动重试
+      var expected = d.expectedCount || 0;
+      if(expected > 0 && _wlEntries.length < expected){
+        addLog('SYS','白名单',`⚠️ 读取不完整: 收到 ${_wlEntries.length}/${expected} 条，1.5s 后自动重试...`,'#f59e0b');
+        _showWlStatus(`⚠️ 读取不完整 (${_wlEntries.length}/${expected})，自动重试中...`, 'warning');
+        setTimeout(function(){ wlRefresh(); }, 1500);
+        return;
+      }
+      wlRender();
+      addLog('SYS','白名单',`✅ 读取完成: ${_wlEntries.length} 个节点 (其中 ${_wlKicked.size} 个已踢出)`,'#22c55e');
+      return;
+    }
+    if(d.type==='kicked'){
+      const kh='0x'+d.nodeId.toString(16).toUpperCase();
+      addLog('SYS','踢出',`🚫 节点 ${kh} 已被踢出，进入静默状态`,'#ef4444');
+      // ★ 清除当前路由高亮（避免踢出后旧路由仍显示实线）
+      currentRoute = null;
+      for(let lk in activeLinks) activeLinks[lk].inRoute = false;
+      // 从拓扑中移除
+      if(activeNodes[kh] && kh!=='PC' && kh!=='0x10'){
+        delete activeNodes[kh];
+        for(let lk in activeLinks){
+          if(activeLinks[lk].source===kh || activeLinks[lk].target===kh) delete activeLinks[lk];
+        }
+        renderTopo();
+      }
+      // ★ 直接更新白名单条目（不触发新 WL? 查询，避免竞态）
+      _wlKicked.add(d.nodeId);
+      for(let i=0;i<_wlEntries.length;i++){
+        if(_wlEntries[i].nodeId===d.nodeId){_wlEntries[i].kicked=true;break;}
+      }
+      _showWlStatus('🚫 节点 ' + kh + ' 已踢出', 'warning');
+      wlRender();
+      return;
+    }
+    if(d.type==='unkicked'){
+      const kh='0x'+d.nodeId.toString(16).toUpperCase();
+      addLog('SYS','恢复',`✅ 节点 ${kh} 已恢复，可重新参与组网`,'#22c55e');
+      // ★ 直接更新白名单条目（不触发新 WL? 查询，避免竞态）
+      _wlKicked.delete(d.nodeId);
+      for(let i=0;i<_wlEntries.length;i++){
+        if(_wlEntries[i].nodeId===d.nodeId){_wlEntries[i].kicked=false;break;}
+      }
+      _showWlStatus('✅ 节点 ' + kh + ' 已恢复', 'success');
+      wlRender();
+      return;
     }
     if(d.type==='text_log'){
       // 仅在组网完成后显示串口文本日志

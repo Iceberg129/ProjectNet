@@ -11,13 +11,16 @@ FRAME_SIZE   = struct.calcsize(FRAME_FORMAT)  # 16
 MSG_RREQ = 0x10; MSG_RREP = 0x11; MSG_DATA = 0x01; MSG_ACK = 0x02
 MSG_HEARTBEAT = 0x03; MSG_CMD = 0x04; MSG_CMD_ACK = 0x05
 MSG_ACK_CONFIRM = 0x06
+MSG_KICK = 0x08; MSG_UNKICK = 0x09
 MSG_JOIN_REQ = 0x20; MSG_JOIN_ACK = 0x21; MSG_JOIN_REJ = 0x22
 MSG_NAMES = {MSG_RREQ:"RREQ",MSG_RREP:"RREP",MSG_DATA:"DATA",MSG_ACK:"ACK",
              MSG_HEARTBEAT:"HB",MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",
+             MSG_KICK:"KICK",MSG_UNKICK:"UNKICK",
              MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
              MSG_ACK_CONFIRM:"ACK_CFM"}
 MSG_ZH    = {MSG_RREQ:"路由发现",MSG_RREP:"路由应答",MSG_DATA:"数据传输",MSG_ACK:"确认应答",
              MSG_HEARTBEAT:"心跳",MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",
+             MSG_KICK:"踢出命令",MSG_UNKICK:"恢复命令",
              MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
              MSG_ACK_CONFIRM:"ACK确认回执"}
 
@@ -245,6 +248,22 @@ class StatsTracker:
         self.current_phase = f"{fail_phase}_fail"
         self.phase_updated = time.time()
 
+    def remove_node_links(self, node_id: int):
+        """Remove all link tracking state for a kicked node.
+        Called when KICKED line received from serial — prevents stale
+        link_broken events for intentionally removed nodes."""
+        node_hex = f"0x{node_id:02X}"
+        to_remove = [lk for lk in self._known_links if node_hex in lk]
+        for lk in to_remove:
+            self._known_links.discard(lk)
+            self._link_fail_count.pop(lk, None)
+            self.link_rssi.pop(lk, None)
+            self.rssi_history.pop(lk, None)
+        # Also clean current_rreq_links so no in-flight cycle references remain
+        stale = [lk for lk in self._current_rreq_links if node_hex in lk]
+        for lk in stale:
+            self._current_rreq_links.discard(lk)
+
     def _handle_heartbeat(self, src, dest, count):
         """Process HB alerts from mainTerm (count=0 online, count=0xFF offline)"""
         if count == 0xFF:
@@ -390,6 +409,8 @@ _TEXT_LOG_KEYWORDS = [
     "FAIL", "ERROR", "NET", "CFG", "NODE", "LINK", "PATH",
     "SEND", "RECV", "ACK", "DATA", "RREQ", "RREP",
     "MISS", "RETRY",  # sender 缺失中继重试日志
+    "WL", "WHITELIST",  # 白名单管理
+    "KICKED", "UNKICKED",  # 踢出/恢复通知
 ]
 
 
@@ -418,7 +439,47 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                     if b == 0x0A:  # \n
                         try:
                             line = text_buf.decode('utf-8', errors='replace').strip()
-                            if line and _is_useful_log(line):
+                            # ★ WL:N: 条目计数 → 记录预期数量，wl_end 时传递给前端校验
+                            if line.startswith("WL:N:"):
+                                try:
+                                    read_serial_thread._wl_expected = int(line[5:])
+                                except: pass
+                            # ★ WL: 白名单数据 → 结构化事件，绕过关键字过滤
+                            elif line.startswith("WL:") and line != "WL:END":
+                                parts = line[3:].split(":")
+                                if len(parts) >= 2:
+                                    nid = int(parts[0], 16)
+                                    kicked = int(parts[2]) == 1 if len(parts) >= 3 else False
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type":"wl_entry","nodeId":nid,
+                                        "nodeHex":f"0x{nid:02X}","role":int(parts[1]),
+                                        "kicked": kicked
+                                    })), loop)
+                            elif line == "WL:END":
+                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                    "type":"wl_end",
+                                    "expectedCount": getattr(read_serial_thread, '_wl_expected', 0)
+                                })), loop)
+                                read_serial_thread._wl_expected = 0  # 重置
+                            # ★ KICKED 输出: "KICKED 0x21"
+                            elif line.startswith("KICKED 0x") or line.startswith("KICKED 0X"):
+                                try:
+                                    kid = int(line.split("0x")[1].strip(), 16)
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type":"kicked","nodeId":kid,
+                                        "nodeHex":f"0x{kid:02X}"
+                                    })), loop)
+                                    stats.remove_node_links(kid)  # 清理链路追踪，防止后续 link_broken
+                                except: pass
+                            elif line.startswith("UNKICKED 0x") or line.startswith("UNKICKED 0X"):
+                                try:
+                                    uid = int(line.split("0x")[1].strip(), 16)
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type":"unkicked","nodeId":uid,
+                                        "nodeHex":f"0x{uid:02X}"
+                                    })), loop)
+                                except: pass
+                            elif line and _is_useful_log(line):
                                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
                                     "type":"text_log","text":line,"time":time.time()
                                 })), loop)
@@ -502,6 +563,9 @@ async def ws_endpoint(websocket: WebSocket):
                     serial_port_obj.write((cmd.get("command","")+"\n").encode())
                     await websocket.send_text(json.dumps({
                         "type":"sys","msg":f"📤 命令已发送: {cmd.get('command','')}"}))
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type":"sys_error","msg":"❌ 串口未打开，无法发送命令。请先点击「🔌 打开串口」"}))
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 

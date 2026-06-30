@@ -21,6 +21,8 @@ const uint8_t MSG_JOIN_REJ = 0x22;
 const uint8_t MSG_CMD = 0x04;
 const uint8_t MSG_CMD_ACK = 0x05;
 const uint8_t MSG_HB       = 0x03;   // heartbeat
+const uint8_t MSG_KICK     = 0x08;   // 踢出命令
+const uint8_t MSG_UNKICK   = 0x09;   // 恢复命令
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t FRAME_SIZE     = 16;
 
@@ -57,7 +59,7 @@ uint8_t  knownRelayCount = 0;
 uint8_t  missingRetryCount = 0;
 const uint8_t MAX_MISSING_RETRIES = 2;  // 缺失中继最多重试 2 次
 
-enum DiscState { JOINING, IDLE, WAITING_RREP, WAITING_ACK };
+enum DiscState { JOINING, IDLE, WAITING_RREP, WAITING_ACK, KICKED };
 DiscState discState    = JOINING;
 uint32_t  rreqSendTime = 0;
 uint32_t  ackSendTime  = 0;
@@ -96,7 +98,9 @@ void setup() {
 
 // =============================================
 void loop() {
-  checkForPacket();
+  checkForPacket();  // ★ 即使 KICKED 也继续监听，等待 UNKICK 恢复
+  if (discState == KICKED) { return; }  // 静默：不收发业务帧
+  // Heartbeat: 10s +/- 2s jitter
   // Heartbeat: 10s +/- 2s jitter
   if (millis() - lastHbTime >= hbInterval) {
     sendHeartbeat();
@@ -310,6 +314,22 @@ void checkForPacket() {
       discState = IDLE;
       lastAction = millis();
       return;
+    }
+    return;
+  }
+  if (frame.msgType == MSG_KICK) {
+    discState = KICKED;
+    Serial.print(F("KICKED by mainTerm r="));
+    Serial.println(LoRa.packetRssi(), DEC);
+    return;
+  }
+  if (frame.msgType == MSG_UNKICK) {
+    if (discState == KICKED) {
+      discState = IDLE;
+      lastAction = millis();
+      route.valid = false;
+      Serial.print(F("UNKICKED — resumed r="));
+      Serial.println(LoRa.packetRssi(), DEC);
     }
     return;
   }

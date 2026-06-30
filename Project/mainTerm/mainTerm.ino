@@ -21,6 +21,8 @@ const uint8_t MSG_CMD       = 0x04;
 const uint8_t MSG_JOIN_REJ   = 0x22;
 const uint8_t MSG_JOIN_ACK   = 0x21;
 const uint8_t MSG_JOIN_REQ   = 0x20;
+const uint8_t MSG_KICK       = 0x08;   // 踢出命令
+const uint8_t MSG_UNKICK     = 0x09;   // 恢复命令
 const uint8_t MAX_STAMPS     = 4;
 const uint8_t FRAME_SIZE     = 16;
 
@@ -134,18 +136,19 @@ void setup() {
 // =============================================
 void loop() {
   if (Serial.available()) {
-    Serial.setTimeout(50);
-    String cmdLine = Serial.readStringUntil("
-");
-    cmdLine.trim();
-    if (cmdLine.length() == 0) { /* skip */ }
-    else if (cmdLine == "j") {
+    // ★ 用固定 char 缓冲区替代 String，避免堆分配挤占 322B 栈余量
+    char buf[32];
+    uint8_t len = Serial.readBytesUntil('\n', buf, 31);
+    buf[len] = '\0';
+    // trim trailing \r
+    if (len > 0 && buf[len-1] == '\r') buf[--len] = '\0';
+    if (len == 0) { /* skip */ }
+    else if (strcmp(buf, "j") == 0) {
       jammingMode = !jammingMode;
       Serial.println(jammingMode ? F("JAMMER ON") : F("JAMMER OFF"));
     }
-    else if (cmdLine == "s") {
-      Serial.print(F("
---- Stats ---"));
+    else if (strcmp(buf, "s") == 0) {
+      Serial.print(F("\n--- Stats ---"));
       Serial.print(F("  total: ")); Serial.print(stat_totalHeard, DEC);
       Serial.print(F("  bad len: ")); Serial.print(stat_badSize, DEC);
       Serial.print(F("  bad magic: ")); Serial.print(stat_badMagic, DEC);
@@ -154,30 +157,46 @@ void loop() {
       Serial.print(F("  good DATA: ")); Serial.print(stat_goodDATA, DEC);
       Serial.println();
     }
-    else if (cmdLine == "WL?") { wlPrint(); }
-    else if (cmdLine.startsWith("WL-")) {
-      uint8_t id = (uint8_t)strtol(cmdLine.substring(3).c_str(), NULL, 16);
+    else if (strcmp(buf, "WL?") == 0) { wlPrint(); }
+    else if (strncmp(buf, "WL-", 3) == 0) {
+      uint8_t id = (uint8_t)strtol(buf + 3, NULL, 16);
       if (wlRemove(id)) { Serial.print(F("WL removed 0x")); Serial.println(id, HEX); }
       else { Serial.print(F("WL not found 0x")); Serial.println(id, HEX); }
     }
-    else if (cmdLine.startsWith("WL+")) {
-      int sep = cmdLine.indexOf(":");
-      uint8_t id = (uint8_t)strtol(cmdLine.substring(3, sep).c_str(), NULL, 16);
-      uint8_t role = (uint8_t)cmdLine.substring(sep+1).toInt();
-      if (wlAdd(id, role)) { Serial.print(F("WL added 0x")); Serial.print(id, HEX); Serial.print(F(" role=")); Serial.println(role, DEC); }
-      else { Serial.println(F("WL add failed")); }
+    else if (strncmp(buf, "WL+", 3) == 0) {
+      char* colon = strchr(buf + 3, ':');
+      if (colon) {
+        *colon = '\0';
+        uint8_t id   = (uint8_t)strtol(buf + 3, NULL, 16);
+        uint8_t role = (uint8_t)atoi(colon + 1);
+        if (wlAdd(id, role)) { Serial.print(F("WL added 0x")); Serial.print(id, HEX); Serial.print(F(" role=")); Serial.println(role, DEC); }
+        else { Serial.println(F("WL add failed")); }
+      }
     }
-    else if (cmdLine.startsWith("CFG:")) {
-      int c1 = cmdLine.indexOf(":");
-      int c2 = cmdLine.indexOf(":", c1+1);
-      uint8_t dest = (uint8_t)strtol(cmdLine.substring(c1+1, c2).c_str(), NULL, 16);
-      int fIdx = cmdLine.indexOf("F");
-      int sIdx = cmdLine.indexOf("S");
-      int pIdx = cmdLine.indexOf("P");
-      uint16_t freq = (uint16_t)cmdLine.substring(fIdx+1, sIdx).toInt();
-      uint8_t sf    = (uint8_t)cmdLine.substring(sIdx+1, pIdx).toInt();
-      uint8_t power = (uint8_t)cmdLine.substring(pIdx+1).toInt();
+    else if (strncmp(buf, "CFG:", 4) == 0) {
+      // CFG:<dest>:F<freq>S<sf>P<power>  e.g. CFG:0x21:F530:S7:P17
+      char* p = buf + 4;
+      uint8_t dest = (uint8_t)strtol(p, &p, 16);
+      uint16_t freq = 530; uint8_t sf = 7, power = 17;
+      while (*p) {
+        if      (*p == 'F' || *p == 'f') freq  = (uint16_t)atoi(p + 1);
+        else if (*p == 'S' || *p == 's') sf    = (uint8_t)atoi(p + 1);
+        else if (*p == 'P' || *p == 'p') power = (uint8_t)atoi(p + 1);
+        p++;
+      }
       sendCMD(dest, freq, sf, power);
+    }
+    else if (strncmp(buf, "KICK:", 5) == 0 || strncmp(buf, "K:", 2) == 0) {
+      char* p = (buf[0] == 'K' && buf[1] == 'I') ? buf + 5 : buf + 2;
+      uint8_t dest = (uint8_t)strtol(p, NULL, 16);
+      sendKick(dest);
+      Serial.print(F("KICKED 0x")); Serial.println(dest, HEX);
+    }
+    else if (strncmp(buf, "UNKICK:", 7) == 0 || strncmp(buf, "UK:", 3) == 0) {
+      char* p = (buf[0] == 'U' && buf[1] == 'N') ? buf + 7 : buf + 3;
+      uint8_t dest = (uint8_t)strtol(p, NULL, 16);
+      sendUnkick(dest);
+      Serial.print(F("UNKICKED 0x")); Serial.println(dest, HEX);
     }
   }
 
@@ -204,6 +223,7 @@ void loop() {
     lastHbScan = millis();
     for (uint8_t id = 0x21; id <= 0x30; id++) {
       if (id == MY_NODE_ID) continue;
+      if (wlIsKicked(id)) continue;  // ★ 跳过已踢出节点，不发送离线告警
       if (nodeOnline[id] && (millis() - nodeLastSeen[id] > HB_TIMEOUT)) {
         nodeOnline[id] = false;
         Serial.print(F("OFFLINE 0x"));
@@ -289,6 +309,20 @@ void handlePacket() {
     return;
   }
 
+  // ★ 白名单过滤：非 JOIN 帧也需检查 srcId 是否在白名单中
+  if (rx->msgType != MSG_JOIN_REQ && wlFind(rx->srcId) < 0) {
+    Serial.print(F("!WL s=0x")); Serial.print(rx->srcId, HEX);
+    Serial.print(F(" r=")); Serial.println(rssi, DEC);
+    return;
+  }
+
+  // ★ 踢出过滤：被踢节点所有非 JOIN 帧一律丢弃（即使 KICK 未送达节点）
+  if (rx->msgType != MSG_JOIN_REQ && wlIsKicked(rx->srcId)) {
+    Serial.print(F("!KICKED s=0x")); Serial.print(rx->srcId, HEX);
+    Serial.print(F(" r=")); Serial.println(rssi, DEC);
+    return;
+  }
+
   // ★ 精简摘要
   if (rx->msgType == MSG_RREQ) stat_goodRREQ++;
   if (rx->msgType == MSG_DATA) stat_goodDATA++;
@@ -310,10 +344,30 @@ void handlePacket() {
   Serial.println();
 
   // ★ 将帧转发给 PC UI（ACK_CONFIRM 由 sendACK 转发，此处跳过避免重复）
+  // ★ 清除踢出中继的数据，避免前端拓扑显示已被踢出的中继
   if (rx->msgType != MSG_ACK_CONFIRM) {
     uint8_t fwd[FRAME_SIZE];
     memcpy(fwd, raw, FRAME_SIZE);
     if (rx->count < 4) fwd[14] = (uint8_t)(int8_t)rssi;
+    // RREQ: 印章 {id, rssi} 对在 data[0..7]
+    if (rx->msgType == MSG_RREQ && rx->count > 0) {
+      for (uint8_t i = 0; i < rx->count && i < MAX_STAMPS; i++) {
+        uint8_t rid = fwd[6 + i*2];
+        if (rid != 0 && wlIsKicked(rid)) {
+          fwd[6 + i*2] = 0;     // 清除中继 ID
+          fwd[6 + i*2 + 1] = 0; // 清除 RSSI
+        }
+      }
+    }
+    // RREP/DATA/ACK: 中继 ID 列表在 data[0..count-1]
+    if ((rx->msgType == MSG_RREP || rx->msgType == MSG_DATA || rx->msgType == MSG_ACK)
+        && rx->count > 0) {
+      for (uint8_t i = 0; i < rx->count && i < MAX_RELAYS; i++) {
+        if (wlIsKicked(fwd[6 + i])) {
+          fwd[6 + i] = 0;  // 清除踢出中继 ID
+        }
+      }
+    }
     Serial.write(fwd, FRAME_SIZE);
   }
 
@@ -400,6 +454,15 @@ void handleCMD_ACK(LoRaFrame* rx, int8_t rssi) {
 }
 void handleRREQ(LoRaFrame* rx) {
   int rssi = LoRa.packetRssi();
+
+  // ★ 跳过经过踢出中继的候选路径（中继可能未收到 KICK 仍转发）
+  for (uint8_t i = 0; i < rx->count; i++) {
+    if (wlIsKicked(rx->data[i*2])) {
+      Serial.print(F("!KICKED relay 0x")); Serial.print(rx->data[i*2], HEX);
+      Serial.print(F(" r=")); Serial.println(rssi, DEC);
+      return;
+    }
+  }
 
   // 新 pathId -> 重置窗口
   if (rx->pathId != currentPathId) {
@@ -589,6 +652,45 @@ void sendCMD(uint8_t destId, uint16_t freq, uint8_t sf, uint8_t power) {
   Serial.println(F(" dBm"));
 }
 
+void sendKick(uint8_t destId) {
+  wlSetKicked(destId, true);  // ★ EEPROM 持久化踢出状态
+  nodeOnline[destId] = false; // ★ 防止心跳离线扫描为其生成告警帧
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = destId;
+  frame.msgType = MSG_KICK;
+  frame.data[0] = 0x4B;  // 'K'
+  calcChecksum(&frame);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.write((uint8_t*)&frame, FRAME_SIZE);
+  Serial.print(F("KICKED 0x"));
+  Serial.println(destId, HEX);
+}
+
+void sendUnkick(uint8_t destId) {
+  wlSetKicked(destId, false);  // ★ 清除 EEPROM 踢出状态
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = destId;
+  frame.msgType = MSG_UNKICK;
+  frame.data[0] = 0x55;  // 'U'
+  calcChecksum(&frame);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.write((uint8_t*)&frame, FRAME_SIZE);
+  Serial.print(F("UNKICKED 0x"));
+  Serial.println(destId, HEX);
+}
+
 // =============================================
 void handleJOIN(LoRaFrame* rx, int8_t rssi) {
   uint8_t srcId = rx->srcId;
@@ -597,6 +699,13 @@ void handleJOIN(LoRaFrame* rx, int8_t rssi) {
   Serial.print(srcId, HEX);
   Serial.print(F(" role=")); Serial.print(role, DEC);
   Serial.print(F(" r=")); Serial.print(rssi, DEC);
+  // ★ 检查是否已被踢出（EEPROM 持久化）
+  if (wlIsKicked(srcId)) {
+    Serial.println(F(" -> KICKED, re-send kick"));
+    sendJoinResponse(srcId, MSG_JOIN_REJ, 0x03);
+    sendKick(srcId);  // 重发 KICK 确保节点保持踢出状态
+    return;
+  }
   int8_t idx = wlFind(srcId);
   if (idx >= 0) {
     uint8_t wlRole = EEPROM.read(EEPROM_ADDR_DATA + idx * WL_ENTRY_SIZE + 1);
@@ -817,6 +926,22 @@ int8_t wlFind(uint8_t id) {
   return -1;
 }
 
+// ---- Whitelist kicked flag (uses reserved byte 2 of WL entry) ----
+void wlSetKicked(uint8_t id, bool kicked) {
+  int8_t idx = wlFind(id);
+  if (idx >= 0) {
+    EEPROM.write(EEPROM_ADDR_DATA + idx * WL_ENTRY_SIZE + 2, kicked ? 1 : 0);
+  }
+}
+
+bool wlIsKicked(uint8_t id) {
+  int8_t idx = wlFind(id);
+  if (idx >= 0) {
+    return EEPROM.read(EEPROM_ADDR_DATA + idx * WL_ENTRY_SIZE + 2) == 1;
+  }
+  return false;
+}
+
 // ---- Whitelist add ----
 bool wlAdd(uint8_t id, uint8_t role) {
   int8_t idx = wlFind(id);
@@ -845,18 +970,25 @@ bool wlRemove(uint8_t id) {
 }
 
 // ---- Whitelist print ----
+// 输出紧凑格式: WL:<hex_id>:<role>:<kicked>，Python 后端直接解析为结构化 JSON
 void wlPrint() {
   uint8_t count = EEPROM.read(EEPROM_ADDR_COUNT);
-  Serial.print(F("
-=== Whitelist ("));
-  Serial.print(count, DEC);
-  Serial.println(F(") ==="));
+  // ★ 先发条目总数，供前端校验完整性
+  Serial.print(F("WL:N:"));
+  Serial.println(count, DEC);
   for (uint8_t i = 0; i < count; i++) {
     uint8_t id   = EEPROM.read(EEPROM_ADDR_DATA + i * WL_ENTRY_SIZE);
     uint8_t role = EEPROM.read(EEPROM_ADDR_DATA + i * WL_ENTRY_SIZE + 1);
-    Serial.print(F("  0x")); Serial.print(id, HEX);
-    Serial.print(F(" role=")); Serial.print(role, DEC);
-    Serial.println(role == 1 ? F(" relay") : F(" sender"));
+    uint8_t kicked = EEPROM.read(EEPROM_ADDR_DATA + i * WL_ENTRY_SIZE + 2);
+    Serial.print(F("WL:"));
+    if (id < 0x10) Serial.write('0');
+    Serial.print(id, HEX);
+    Serial.write(':');
+    Serial.print(role, DEC);
+    Serial.write(':');
+    Serial.println(kicked, DEC);
+    delay(2);  // ★ 每行间隔 2ms，防止 TX 缓冲区溢出导致丢行
   }
-  Serial.println();
+  Serial.println(F("WL:END"));
+  Serial.flush();  // ★ 确保白名单文本全部发送完毕，避免后续二进制帧混入
 }
