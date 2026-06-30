@@ -7,7 +7,7 @@
 #include <LoRa.h>
 
 // ---------- 节点身份（烧录时修改） ----------
-const uint8_t MY_NODE_ID = 0x22;       // 中继节点 ID
+const uint8_t MY_NODE_ID = 0x21;       // 中继节点 ID
 
 // ---------- 协议常量 ----------
 const uint8_t FRAME_HEADER_0 = 0x4C;
@@ -16,6 +16,7 @@ const uint8_t MSG_RREQ       = 0x10;   // 探路请求
 const uint8_t MSG_RREP       = 0x11;   // 探路应答
 const uint8_t MSG_DATA       = 0x01;   // 用户数据
 const uint8_t MSG_ACK        = 0x02;   // 数据确认
+const uint8_t MSG_ACK_CONFIRM = 0x06;   // ACK 确认回执
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t MAX_STAMPS     = 4;      // 最多 4 对 {id, rssi} = 8 字节
 const uint8_t FRAME_SIZE     = 16;
@@ -35,7 +36,7 @@ typedef struct {
 #pragma pack(pop)
 
 // ---------- 非阻塞转发队列 ----------
-#define MAX_PENDING 2
+#define MAX_PENDING 4
 struct PendingFwd {
   LoRaFrame frame;
   uint32_t  nextSend;
@@ -48,10 +49,12 @@ uint8_t pendingCount = 0;
 // ---------- 全局接收缓冲 ----------
 LoRaFrame rxFrame;
 
-// ---------- 转发去重（防乒乓循环） ----------
+// ---------- 转发去重（防乒乓循环，2秒过期允许重传） ----------
 #define FWD_HISTORY 4
+#define FWD_EXPIRE_MS 400    // 去重 400ms 过期：拦截乒乓循环(~10ms)，放行重传(~530ms)
 struct FwdRecord {
   uint8_t srcId, destId, pathId, msgType;
+  uint32_t timestamp;
 };
 FwdRecord fwdHist[FWD_HISTORY];
 uint8_t  fwdHistIdx = 0;
@@ -61,23 +64,28 @@ bool wasForwarded(uint8_t srcId, uint8_t destId, uint8_t pathId, uint8_t msgType
     if (fwdHist[i].srcId == srcId &&
         fwdHist[i].destId == destId &&
         fwdHist[i].pathId == pathId &&
-        fwdHist[i].msgType == msgType) return true;
+        fwdHist[i].msgType == msgType) {
+      // 未过期 → 确实已转发，拦截
+      if (millis() - fwdHist[i].timestamp < FWD_EXPIRE_MS) return true;
+      // 已过期 → 继续检查其他槽位（可能有更新的记录）
+    }
   }
   return false;
 }
 
 void markForwarded(uint8_t srcId, uint8_t destId, uint8_t pathId, uint8_t msgType) {
-  fwdHist[fwdHistIdx].srcId   = srcId;
-  fwdHist[fwdHistIdx].destId  = destId;
-  fwdHist[fwdHistIdx].pathId  = pathId;
-  fwdHist[fwdHistIdx].msgType = msgType;
+  fwdHist[fwdHistIdx].srcId     = srcId;
+  fwdHist[fwdHistIdx].destId    = destId;
+  fwdHist[fwdHistIdx].pathId    = pathId;
+  fwdHist[fwdHistIdx].msgType   = msgType;
+  fwdHist[fwdHistIdx].timestamp = millis();
   fwdHistIdx = (fwdHistIdx + 1) % FWD_HISTORY;
 }
 
 // =============================================
 void setup() {
 
-  LoRa.setPins(A3);
+  // LoRa.setPins(A3);
   Serial.begin(9600);
   while (!Serial);
 
@@ -92,7 +100,7 @@ void setup() {
 
   Serial.print(F("Relay 0x"));
   Serial.print(MY_NODE_ID, HEX);
-  Serial.println(F(" ready. [AODV-Lite non-blocking]  freq=530MHz SF7 Tx=17dBm"));
+  Serial.println(F(" OK  530MHz SF7"));
 }
 
 // =============================================
@@ -130,13 +138,16 @@ void servicePending() {
       pending[p].active = false;
       pendingCount--;
 
-      Serial.print(F("  └─ RREQ SENT  stamps=["));
+      bool isRREQ = (pending[p].frame.msgType == MSG_RREQ);
+      Serial.print(F("  fwd tx ["));
       for (uint8_t i = 0; i < pending[p].frame.count; i++) {
         Serial.print(F("0x"));
-        Serial.print(pending[p].frame.data[i * 2], HEX);
-        Serial.write(':');
-        Serial.print((int8_t)pending[p].frame.data[i * 2 + 1], DEC);
-        if (i < pending[p].frame.count - 1) Serial.print(F(", "));
+        Serial.print(pending[p].frame.data[isRREQ ? (i * 2) : i], HEX);
+        if (isRREQ) {
+          Serial.write(':');
+          Serial.print((int8_t)pending[p].frame.data[i * 2 + 1], DEC);
+        }
+        if (i < pending[p].frame.count-1) Serial.write(',');
       }
       Serial.println(F("]"));
     }
@@ -146,7 +157,10 @@ void servicePending() {
 // =============================================
 // 添加一个待转发帧到队列
 // =============================================
-bool enqueueForward(LoRaFrame* f, uint32_t backoff, int8_t rssi) {
+bool enqueueForward(LoRaFrame* f, uint32_t backoff, int8_t rssi, const __FlashStringHelper* type) {
+  // RREQ: data[]={id,rssi}对; RREP/ACK/DATA: data[]=中继ID列表
+  bool isRREQ = (f->msgType == MSG_RREQ);
+
   // 检查是否已有相同的待转发（去重 pending 队列）
   for (uint8_t p = 0; p < MAX_PENDING; p++) {
     if (pending[p].active &&
@@ -156,11 +170,12 @@ bool enqueueForward(LoRaFrame* f, uint32_t backoff, int8_t rssi) {
       // 检查中继 ID 链是否相同
       bool same = true;
       for (uint8_t j = 0; j < f->count; j++) {
-        if (pending[p].frame.data[j * 2] != f->data[j * 2]) { same = false; break; }
+        uint8_t idx = isRREQ ? (j * 2) : j;
+        if (pending[p].frame.data[idx] != f->data[idx]) { same = false; break; }
       }
       if (same) {
         // 已在队列中，不重复添加
-        Serial.print(F("  └─ RREQ already queued"));
+        Serial.print(F("  ")); Serial.print(type); Serial.println(F(" dup"));
         return false;
       }
     }
@@ -175,17 +190,21 @@ bool enqueueForward(LoRaFrame* f, uint32_t backoff, int8_t rssi) {
       pending[p].active   = true;
       pendingCount++;
 
-      Serial.print(F("  └─ RREQ queued  backoff="));
+      Serial.print(F("  ")); Serial.print(type); Serial.print(F(" q bo="));
       Serial.print(backoff, DEC);
-      Serial.print(F("ms rssi="));
-      Serial.print(rssi, DEC);
-      Serial.print(F("dBm stamps=["));
+      if (isRREQ) {
+        Serial.print(F(" r="));
+        Serial.print(rssi, DEC);
+      }
+      Serial.print(F(" ["));
       for (uint8_t i = 0; i < f->count; i++) {
         Serial.print(F("0x"));
-        Serial.print(f->data[i * 2], HEX);
-        Serial.write(':');
-        Serial.print((int8_t)f->data[i * 2 + 1], DEC);
-        if (i < f->count - 1) Serial.print(F(", "));
+        Serial.print(f->data[isRREQ ? (i * 2) : i], HEX);
+        if (isRREQ) {
+          Serial.write(':');
+          Serial.print((int8_t)f->data[i * 2 + 1], DEC);
+        }
+        if (i < f->count-1) Serial.write(',');
       }
       Serial.println(F("]"));
       return true;
@@ -193,7 +212,7 @@ bool enqueueForward(LoRaFrame* f, uint32_t backoff, int8_t rssi) {
   }
 
   // 队列满
-  Serial.println(F("  └─ RREQ dropped: pending queue full"));
+  Serial.print(F("  ")); Serial.print(type); Serial.println(F(" drop full"));
   return false;
 }
 
@@ -221,33 +240,31 @@ void handlePacket() {
     ignore = true; reason = "checksum fail";
   }
 
-  Serial.print(ignore ? F("[IGNORE] ") : F("[ HEAR] "));
-  Serial.print(F("type=0x"));
+  // ★ 先转发（不阻塞），再打印日志（避免串口拖慢转发）
+  if (!ignore) {
+    switch (rxFrame.msgType) {
+      case MSG_RREQ:  handleRREQ(rssi);  break;
+      case MSG_RREP:  handleRREP();      break;
+      case MSG_DATA:  handleDATA();      break;
+      case MSG_ACK:   handleACK();       break;
+      case MSG_ACK_CONFIRM: handleACK(); break;
+      default: break;
+    }
+  }
+
+  Serial.print(ignore ? F("!") : F("H "));
+  Serial.print(F("t=0x"));
   Serial.print(rxFrame.msgType, HEX);
-  Serial.print(F(" src=0x"));
+  Serial.print(F(" s=0x"));
   Serial.print(rxFrame.srcId, HEX);
-  Serial.print(F(" dst=0x"));
+  Serial.print(F(" d=0x"));
   Serial.print(rxFrame.destId, HEX);
-  Serial.print(F(" cnt="));
+  Serial.print(F(" n="));
   Serial.print(rxFrame.count, DEC);
-  Serial.print(F(" RSSI="));
+  Serial.print(F(" r="));
   Serial.print(rssi, DEC);
-  if (ignore) {
-    Serial.print(F(" ("));
-    Serial.print(reason);
-    Serial.print(F(")"));
-  }
+  if (ignore) { Serial.write(' '); Serial.print(reason); }
   Serial.println();
-
-  if (ignore) return;
-
-  switch (rxFrame.msgType) {
-    case MSG_RREQ:  handleRREQ(rssi);  break;
-    case MSG_RREP:  handleRREP();      break;
-    case MSG_DATA:  handleDATA();      break;
-    case MSG_ACK:   handleACK();       break;
-    default: return;
-  }
 }
 
 // =============================================
@@ -256,14 +273,13 @@ void handlePacket() {
 void handleRREQ(int8_t rssi) {
   // 防环
   if (rxFrame.count >= MAX_STAMPS) {
-    Serial.print(F("  └─ RREQ skipped: stamps full ("));
-    Serial.print(rxFrame.count, DEC);
-    Serial.println(F(")"));
+    Serial.print(F("  skip stamps="));
+    Serial.println(rxFrame.count, DEC);
     return;
   }
   for (uint8_t i = 0; i < rxFrame.count; i++) {
     if (rxFrame.data[i * 2] == MY_NODE_ID) {
-      Serial.println(F("  └─ RREQ skipped: already stamped"));
+      Serial.println(F("  skip stamped"));
       return;
     }
   }
@@ -287,7 +303,7 @@ void handleRREQ(int8_t rssi) {
     backoff = (MY_NODE_ID & 0x0F) * 40 + 100;  // 多跳：0x21→140ms, 0x22→180ms（等1跳全部清空）
   }
 
-  enqueueForward(&rxFrame, backoff, rssi);
+  enqueueForward(&rxFrame, backoff, rssi, F("RREQ"));
 }
 
 // =============================================
@@ -295,13 +311,14 @@ void handleRREQ(int8_t rssi) {
 // =============================================
 void handleRREP() {
   bool inPath = false;
+  uint8_t myPos = 0;
   for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
-    if (rxFrame.data[i] == MY_NODE_ID) { inPath = true; break; }
+    if (rxFrame.data[i] == MY_NODE_ID) { inPath = true; myPos = i; break; }
   }
   if (!inPath) {
-    Serial.print(F("  └─ RREP skipped: I(0x"));
+    Serial.print(F("  RREP !path I=0x"));
     Serial.print(MY_NODE_ID, HEX);
-    Serial.print(F(") not in path ["));
+    Serial.print(F(" path=["));
     for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
       Serial.print(F("0x"));
       Serial.print(rxFrame.data[i], HEX);
@@ -312,22 +329,15 @@ void handleRREP() {
   }
 
   if (wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
-    Serial.println(F("  └─ RREP skipped: already forwarded (dedup)"));
+    Serial.println(F("  RREP dedup"));
     return;
   }
   markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
 
-  LoRa.beginPacket();
-  LoRa.write((uint8_t*)&rxFrame, FRAME_SIZE);
-  LoRa.endPacket();
-
-  Serial.print(F("  └─ RREP FORWARDED  path=["));
-  for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
-    Serial.print(F("0x"));
-    Serial.print(rxFrame.data[i], HEX);
-    Serial.write(' ');
-  }
-  Serial.println(F("]"));
+  // ★ 位置退避：多头中继避免同时转发碰撞
+  // myPos=0(靠终端)→10ms, myPos=1(靠主节点)→70ms
+  uint32_t backoff = myPos * 60 + 10;
+  enqueueForward(&rxFrame, backoff, 0, F("RREP"));
 }
 
 // =============================================
@@ -335,13 +345,14 @@ void handleRREP() {
 // =============================================
 void handleACK() {
   bool inPath = false;
+  uint8_t myPos = 0;
   for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
-    if (rxFrame.data[i] == MY_NODE_ID) { inPath = true; break; }
+    if (rxFrame.data[i] == MY_NODE_ID) { inPath = true; myPos = i; break; }
   }
   if (!inPath) {
-    Serial.print(F("  └─ ACK skipped: I(0x"));
+    Serial.print(F("  ACK !path I=0x"));
     Serial.print(MY_NODE_ID, HEX);
-    Serial.print(F(") not in path ["));
+    Serial.print(F(" path=["));
     for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
       Serial.print(F("0x"));
       Serial.print(rxFrame.data[i], HEX);
@@ -352,26 +363,14 @@ void handleACK() {
   }
 
   if (wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
-    Serial.println(F("  └─ ACK skipped: already forwarded (dedup)"));
+    Serial.println(F("  ACK dedup"));
     return;
   }
   markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
 
-  // ★ ACK 发 2 份（中继侧降级，源头 mainTerm 保持 3 份）
-  for (uint8_t i = 0; i < 2; i++) {
-    LoRa.beginPacket();
-    LoRa.write((uint8_t*)&rxFrame, FRAME_SIZE);
-    LoRa.endPacket();
-    if (i < 1) delay(80);
-  }
-
-  Serial.print(F("  └─ ACK FORWARDED  path=["));
-  for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
-    Serial.print(F("0x"));
-    Serial.print(rxFrame.data[i], HEX);
-    Serial.write(' ');
-  }
-  Serial.println(F("]"));
+  // ★ 位置退避：多头中继避免同时转发碰撞
+  uint32_t backoff = myPos * 60 + 10;
+  enqueueForward(&rxFrame, backoff, 0, F("ACK"));
 }
 
 // =============================================
@@ -379,13 +378,14 @@ void handleACK() {
 // =============================================
 void handleDATA() {
   bool inPath = false;
+  uint8_t myPos = 0;
   for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
-    if (rxFrame.data[i] == MY_NODE_ID) { inPath = true; break; }
+    if (rxFrame.data[i] == MY_NODE_ID) { inPath = true; myPos = i; break; }
   }
   if (!inPath) {
-    Serial.print(F("  └─ DATA skipped: I(0x"));
+    Serial.print(F("  DATA !path I=0x"));
     Serial.print(MY_NODE_ID, HEX);
-    Serial.print(F(") not in path ["));
+    Serial.print(F(" path=["));
     for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
       Serial.print(F("0x"));
       Serial.print(rxFrame.data[i], HEX);
@@ -396,22 +396,14 @@ void handleDATA() {
   }
 
   if (wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
-    Serial.println(F("  └─ DATA skipped: already forwarded (dedup)"));
+    Serial.println(F("  DATA dedup"));
     return;
   }
   markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
 
-  LoRa.beginPacket();
-  LoRa.write((uint8_t*)&rxFrame, FRAME_SIZE);
-  LoRa.endPacket();
-
-  Serial.print(F("  └─ DATA FORWARDED  path=["));
-  for (uint8_t i = 0; i < rxFrame.count && i < MAX_RELAYS; i++) {
-    Serial.print(F("0x"));
-    Serial.print(rxFrame.data[i], HEX);
-    Serial.write(' ');
-  }
-  Serial.println(F("]"));
+  // ★ 位置退避：多头中继避免同时转发碰撞
+  uint32_t backoff = myPos * 60 + 10;
+  enqueueForward(&rxFrame, backoff, 0, F("DATA"));
 }
 
 // =============================================

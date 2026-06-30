@@ -10,13 +10,16 @@ FRAME_SIZE   = struct.calcsize(FRAME_FORMAT)  # 16
 
 MSG_RREQ = 0x10; MSG_RREP = 0x11; MSG_DATA = 0x01; MSG_ACK = 0x02
 MSG_HEARTBEAT = 0x03; MSG_CMD = 0x04; MSG_CMD_ACK = 0x05
+MSG_ACK_CONFIRM = 0x06
 MSG_JOIN_REQ = 0x20; MSG_JOIN_ACK = 0x21; MSG_JOIN_REJ = 0x22
 MSG_NAMES = {MSG_RREQ:"RREQ",MSG_RREP:"RREP",MSG_DATA:"DATA",MSG_ACK:"ACK",
              MSG_HEARTBEAT:"HB",MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",
-             MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO"}
+             MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
+             MSG_ACK_CONFIRM:"ACK_CFM"}
 MSG_ZH    = {MSG_RREQ:"路由发现",MSG_RREP:"路由应答",MSG_DATA:"数据传输",MSG_ACK:"确认应答",
              MSG_HEARTBEAT:"心跳",MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",
-             MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝"}
+             MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
+             MSG_ACK_CONFIRM:"ACK确认回执"}
 
 NODE_ROLES = {
     0x10: {"role":"主节点","en":"mainTerm","color":"#f97316","size":60},
@@ -74,6 +77,7 @@ class StatsTracker:
         elif msg_type == MSG_RREP:      self.rrep += 1
         elif msg_type == MSG_DATA:      self.data += 1
         elif msg_type == MSG_ACK:       self.ack  += 1
+        elif msg_type == MSG_ACK_CONFIRM: pass  # 不计入 ack 计数
         elif msg_type == MSG_JOIN_REQ:  pass  # 入网请求不计数主类型
         elif msg_type == MSG_HEARTBEAT: pass
         else:                           self.bad  += 1
@@ -107,6 +111,7 @@ class StatsTracker:
         elif msg_type == MSG_RREP: self._set_phase("rrep", now)
         elif msg_type == MSG_DATA: self._set_phase("data", now)
         elif msg_type == MSG_ACK:  self._set_phase("ack", now)
+        elif msg_type == MSG_ACK_CONFIRM: self._set_phase("ack_done", now)
 
     def _set_phase(self, phase, now):
         self.current_phase = phase
@@ -282,10 +287,10 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                     if rid or r: stamps.append({"id":f"0x{rid:02X}","rssi":r})
                                 if count < 4:
                                     last_hop = to_int8(data_bytes[7])
-                            elif msg_type in (MSG_RREP, MSG_DATA, MSG_ACK):
+                            elif msg_type in (MSG_RREP, MSG_DATA, MSG_ACK, MSG_ACK_CONFIRM):
                                 for i in range(min(count, 8)):
                                     if data_bytes[i]: relays.append(data_bytes[i])
-                                # RREP/ACK 是 mainTerm 发出的，data[7] 无真实 RSSI；只有 DATA 有
+                                # RREP/ACK/ACK_CONFIRM: data[7] 无真实 RSSI；只有 DATA 有
                                 if msg_type == MSG_DATA and count < 4:
                                     last_hop = to_int8(data_bytes[7])
                             stats.record_frame(src, dest, msg_type, path_id, count, stamps, relays)
@@ -491,14 +496,42 @@ async def simulate_traffic():
                 await asyncio.sleep(0.12)
                 await _check_cancel()
 
-                # ACK ×3
-                for _ in range(3):
+                # ACK 超时重传（最多 3 次）
+                import random
+                ack_sent = 0
+                ack_success = False
+                while ack_sent < 3 and not ack_success:
+                    await _check_cancel()
+                    ack_sent += 1
                     dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
                     rec(0x10, 0x30, MSG_ACK, pid, len(chosen), [], chosen)
-                    bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_ACK,"msgTypeName":"ACK",
+                    ack_frame = {"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_ACK,"msgTypeName":"ACK",
                            "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                           "dataHex":dhex,"checksum":0})
+                           "dataHex":dhex,"checksum":0}
+                    if ack_sent > 1:
+                        ack_frame["_retry"] = ack_sent  # 前端可展示重传次数
+                    bcast(ack_frame)
+                    # 模拟超时等待（150~250ms）
+                    await asyncio.sleep(0.18)
+                    await _check_cancel()
+                    # 模拟确认：第1次 70% 成功率，第2次 90%，第3次必然成功
+                    success_rate = 0.7 if ack_sent == 1 else 0.9 if ack_sent == 2 else 1.0
+                    ack_success = random.random() < success_rate
+
+                # ACK 成功 → sender 回 ACK_CONFIRM
+                if ack_success:
                     await asyncio.sleep(0.05)
+                    await _check_cancel()
+                    cfm_hex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
+                    bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_ACK_CONFIRM,
+                           "msgTypeName":"ACK_CFM","pathId":pid,"count":len(chosen),
+                           "rssiStamps":[],"relays":chosen,"dataHex":cfm_hex,"checksum":0})
+                else:
+                    # ACK 重传全部耗尽 → 路由失效
+                    stats.current_route = None
+                    stats.current_phase = "ack_fail"
+                    stats.phase_updated = time.time()
+                    bcast({"type":"route_fail","pathId":pid,"relays":chosen,"msg":"ACK 重传耗尽，路由失效"})
 
             return {"status":"ok","msg":f"✅ 模拟 {len(choices)} 轮 AODV-Lite 通信完成（含 RSSI 漂移）","rounds":len(choices)}
         except asyncio.CancelledError:
@@ -509,11 +542,36 @@ async def simulate_traffic():
             return {"status":"cancelled","msg":"模拟已停止","rounds":0}
 
 # ════════════════════ 定时推送 ════════════════════
+ACK_TIMEOUT_SEC = 4.0  # ACK 阶段超过此时间未收到 ACK_CONFIRM 视为失败
+# ★ 各阶段超时阈值（秒）— 卡在任何阶段过久均视作传输失败
+PHASE_TIMEOUTS = {
+    "rreq": 6.0,   # RREQ: sender 最多 3 次重试 × 2s + 退避 ≈ 7s，6s 起检
+    "rrep": 5.0,   # RREP: 正常 <1s，超过 5s 异常
+    "data": 5.0,   # DATA: 正常 <1s，超过 5s 异常
+    "ack":  4.0,   # ACK: 3 次重传 × 800ms ≈ 2.4s，4s 起检
+}
 async def periodic_stats():
     while True:
         await asyncio.sleep(3)
         try: await manager.broadcast_stats()
         except Exception: pass
+        # ★ 各阶段超时检测：卡在任何阶段过久均视作传输失败
+        phase = stats.current_phase
+        if phase in PHASE_TIMEOUTS:
+            elapsed = time.time() - stats.phase_updated
+            if elapsed > PHASE_TIMEOUTS[phase]:
+                route_info = stats.current_route or {}
+                phase_names = {"rreq":"路由发现","rrep":"路由应答","data":"数据传输","ack":"确认应答"}
+                cn_name = phase_names.get(phase, phase)
+                await manager.broadcast(json.dumps({
+                    "type": "phase_timeout",
+                    "phase": phase,
+                    "pathId": route_info.get("pathId", 0),
+                    "relays": route_info.get("relays", []),
+                    "msg": f"{cn_name}({phase}) 阶段超时 — 传输失败"
+                }))
+                stats.current_phase = f"{phase}_fail"  # 保持告警状态，直到下轮 RREQ 重置
+                stats.phase_updated = time.time()
 
 @app.on_event("startup")
 async def on_startup():

@@ -45,6 +45,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
   </div>
   <div class="flex items-center gap-2.5">
     <select id="port-select" class="text-sm rounded-md px-2 py-1.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"><option value="">加载端口...</option></select>
+    <button onclick="fetchPorts()" title="刷新串口列表" class="btn-trans text-sm px-2 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">🔄</button>
     <select id="baud-select" class="text-sm rounded-md px-2 py-1.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
       <option value="9600" selected>9600</option><option value="115200">115200</option></select>
     <button id="btn-serial" onclick="toggleSerial()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md text-white" style="background:var(--cyan);">🔌 打开串口</button>
@@ -166,7 +167,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 
 <script>
 // ════════════════════ 常量 ════════════════════
-const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22;
+const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_ACK_CONFIRM=0x06,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22;
 const MSG_META={
   [MSG_RREQ]:['RREQ','路由发现','#f97316'],
   [MSG_RREP]:['RREP','路由应答','#22d3ee'],
@@ -175,6 +176,7 @@ const MSG_META={
   [MSG_HB]:['HB','心跳保活','#8b5cf6'],
   [MSG_CMD]:['CMD','下行命令','#f59e0b'],
   [MSG_CMD_ACK]:['CMD_OK','命令应答','#10b981'],
+  [MSG_ACK_CONFIRM]:['ACK_CFM','ACK确认回执','#10b981'],
   [MSG_JOIN]:['JOIN','入网请求','#ec4899'],
   [MSG_JOIN_OK]:['JOIN_OK','入网允许','#22c55e'],
   [MSG_JOIN_NO]:['JOIN_NO','入网拒绝','#ef4444'],
@@ -198,7 +200,6 @@ const NODE_POS={
 };
 let activeNodes={
   'PC':{id:'PC',name:'PC 网关',cat:4,size:65,color:'#0ea5e9',lastSeen:Date.now(),decId:0},
-  '0x10':{id:'0x10',name:'主节点\n0x10',cat:0,size:60,color:'#f97316',lastSeen:Date.now(),decId:16}
 };
 let activeLinks={};
 let linkRssiCache={};
@@ -212,9 +213,6 @@ let networkReady=false;           // 组网完成后才显示串口日志
 let joinedNodeSet=new Set();      // 已入网的节点 ID
 let topoThrottle=null;            // 拓扑渲染节流定时器
 
-// Init default links (canonical: lo-hex < hi-hex)
-activeLinks['PC-0x10']={source:'PC',target:'0x10',rssi:null,lineColor:'#0ea5e9',lineWidth:3,lineType:'solid',inRoute:false};
-activeLinks['0x10-0x30']={source:'0x10',target:'0x30',rssi:null,lineColor:'#6b7280',lineWidth:1.5,lineType:'dashed',inRoute:false};
 
 // ════════════════════ ECharts: 拓扑图 ════════════════════
 const topoDom=document.getElementById('topology-chart');
@@ -225,15 +223,26 @@ function makeTopoOption(){
     backgroundColor:'transparent',
     tooltip:{
       formatter:function(p){
-        if(p.dataType==='edge'){
-          let r=p.data.rssi,rs=r!==null&&r!==undefined?r+' dBm':'未知';
-          return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>RSSI: ${rs}`;
-        }
-        let n=activeNodes[p.data.id];
-        if(!n)return p.name;
-        let info=`<b>${n.name.replace('\n',' ')}</b><br/>最近活跃: ${((Date.now()-n.lastSeen)/1000).toFixed(0)}s 前`;
-        return info;
-      }
+            if(p.dataType==='edge'){
+              const isWired=p.data.source==='PC'||p.data.target==='PC';
+              if(isWired)return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>🔌 USB 有线连接`;
+              let r=p.data.rssi,rs=r!==null&&r!==undefined?r+' dBm':'未知';
+              return `<b>${p.data.source} ↔ ${p.data.target}</b><br/>📶 RSSI: ${rs}`;
+            }
+            let n=activeNodes[p.data.id];
+            if(!n)return p.name;
+            if(p.data.id==='PC'){
+              return `<b>${n.name.replace('\n',' ')}</b><br/>🖥 本地网关 · 始终在线`;
+            }
+            if(p.data.id==='0x10'&&!isSerialOpen){
+              return `<b>${n.name.replace('\n',' ')}</b><br/>⚠️ 串口未连接`;
+            }
+            if(!n.lastSeen){
+              return `<b>${n.name.replace('\n',' ')}</b><br/>⏳ 等待数据...`;
+            }
+            let info=`<b>${n.name.replace('\n',' ')}</b><br/>最近活跃: ${((Date.now()-n.lastSeen)/1000).toFixed(0)}s 前`;
+            return info;
+          }
     },
     animationDurationUpdate:300,animationEasingUpdate:'cubicInOut',
     series:[{
@@ -241,12 +250,13 @@ function makeTopoOption(){
       force:{repulsion:350,edgeLength:[150,280],gravity:0.05,friction:0.85},
       data:Object.values(activeNodes).map(n=>{
         const pos=NODE_POS[n.id];
+        const stale=n.stale===true;
         return{
-          id:n.id,name:n.name,category:n.cat,symbolSize:n.size,
+          id:n.id,name:n.name+(stale?' [离线]':''),category:n.cat,symbolSize:n.size,
           x:pos?pos.x:undefined, y:pos?pos.y:undefined,
           fixed:!!pos,
-          itemStyle:{color:n.color,shadowBlur:n.id==='PC'?0:10,shadowColor:n.color,borderColor:n.color,borderWidth:n.id==='PC'?3:2},
-          label:{show:true,position:'bottom',distance:12,color:'#cbd5e1',fontSize:11,formatter:p=>p.name}
+          itemStyle:{color:n.color,shadowBlur:stale?0:(n.id==='PC'?0:10),shadowColor:n.color,borderColor:n.color,borderWidth:n.id==='PC'?3:2,opacity:stale?0.35:1},
+          label:{show:true,position:'bottom',distance:12,color:stale?'#64748b':'#cbd5e1',fontSize:11,formatter:p=>p.name}
         };
       }),
       links:Object.values(activeLinks).map(l=>{
@@ -255,6 +265,7 @@ function makeTopoOption(){
         const routeColor=isRoute?rssiColor(l.rssi):null;
         return{
           source:l.source,target:l.target,
+          rssi:l.rssi,  // ★ 传递给 tooltip 使用
           lineStyle:{
             color:isRoute?routeColor:isWired?'#0ea5e9':rssiColor(l.rssi),
             width:isRoute?3.5:isWired?2.5:1.2,
@@ -412,11 +423,57 @@ function updateStats(s){
 
 // ════════════════════ 通信阶段指示器 ════════════════════
 let lastPhase=null;
-function updatePhaseIndicator(phase){
-  if(phase===lastPhase)return;lastPhase=phase;
+function updatePhaseIndicator(phase,ackWarn){
+  if(phase===lastPhase&&!ackWarn)return;
+  // ★ 阶段变化时记录起始时间（用于前端超时检测）
+  if(phase!==lastPhase)phaseStartTime=Date.now();
+  lastPhase=phase;
   const phases=['rreq','rrep','data','ack'];
   const colors={rreq:'#f97316',rrep:'#22d3ee',data:'#22c55e',ack:'#eab308'};
+
+  if(phase==='ack_done'){
+    // ACK_CONFIRM 收到 → 全部 4 阶段 ✓
+    document.querySelectorAll('.phase-step').forEach((el,i)=>{
+      const circle=el.querySelector('div:first-child');
+      const label=el.querySelector('span');
+      circle.style.background=colors[phases[i]]+'22';circle.style.borderColor=colors[phases[i]];
+      circle.style.color=colors[phases[i]];circle.textContent='✓';circle.classList.remove('phase-active');
+      label.style.color=colors[phases[i]];
+    });
+    return;
+  }
+
+  // ★ 通用失败状态处理：rreq_fail / rrep_fail / data_fail / ack_fail / ack_warn
+  const failIdx=phases.indexOf(phase.replace('_fail','').replace('_warn',''));
+  if(phase.endsWith('_fail')||phase.endsWith('_warn')){
+    document.querySelectorAll('.phase-step').forEach((el,i)=>{
+      const circle=el.querySelector('div:first-child');
+      const label=el.querySelector('span');
+      circle.classList.remove('phase-active');
+      if(i<failIdx){
+        // 失败阶段之前的：已完成 ✓
+        circle.style.background=colors[phases[i]]+'22';circle.style.borderColor=colors[phases[i]];
+        circle.style.color=colors[phases[i]];circle.textContent='✓';
+        label.style.color=colors[phases[i]];
+      }else if(i===failIdx){
+        // 失败阶段：⚠ 红色闪烁
+        circle.style.background='#ef444422';circle.style.borderColor='#ef4444';
+        circle.style.color='#ef4444';circle.textContent='⚠';circle.classList.add('phase-active');
+        label.style.color='#ef4444';
+      }else{
+        // 之后的阶段：灰色（未到达）
+        circle.style.background='transparent';circle.style.borderColor='var(--brd)';
+        circle.style.color='var(--mut)';circle.textContent=String(i+1);circle.classList.remove('phase-active');
+        label.style.color='var(--mut)';
+      }
+    });
+    setTimeout(()=>document.querySelectorAll('.phase-active').forEach(e=>e.classList.remove('phase-active')),600);
+    return;
+  }
+
+  // 正常阶段推进
   const idx=phases.indexOf(phase);
+  if(idx<0)return;
   document.querySelectorAll('.phase-step').forEach((el,i)=>{
     const circle=el.querySelector('div:first-child');
     const label=el.querySelector('span');
@@ -437,14 +494,35 @@ function updatePhaseIndicator(phase){
   setTimeout(()=>document.querySelectorAll('.phase-active').forEach(e=>e.classList.remove('phase-active')),600);
 }
 
+// ★ 前端阶段超时检测（后端周期性检查的补充）
+let phaseStartTime=Date.now();
+const FRONTEND_PHASE_TIMEOUTS={rreq:8000,rrep:6000,data:6000,ack:6000};  // 毫秒，比后端略宽松
+function checkPhaseTimeout(){
+  // 只在非 idle/非 done/非 fail 状态下检查
+  if(!lastPhase||lastPhase==='idle'||lastPhase==='ack_done'||lastPhase.endsWith('_fail')||lastPhase.endsWith('_warn'))return;
+  const timeout=FRONTEND_PHASE_TIMEOUTS[lastPhase];
+  if(!timeout)return;
+  if(Date.now()-phaseStartTime>timeout){
+    console.warn(`Phase timeout: ${lastPhase} (${(Date.now()-phaseStartTime)/1000}s)`);
+    // 触发失败处理
+    for(let k in activeLinks)activeLinks[k].inRoute=false;
+    updatePhaseIndicator(lastPhase+'_fail');
+    addLog(lastPhase.toUpperCase(),'阶段超时',`${lastPhase} 阶段 ${((Date.now()-phaseStartTime)/1000).toFixed(1)}s 无响应 → 传输失败`,'#ef4444');
+    renderTopo();
+  }
+}
+setInterval(checkPhaseTimeout,2000);  // 每 2 秒检查一次
+
 // ════════════════════ 拓扑更新 ════════════════════
 function ensureNode(decId,now){
   const h=hex(decId),m=meta(decId);
   if(!activeNodes[h]){
     activeNodes[h]={id:h,name:`${m.role}\n${hexS(decId)}`,cat:m.cat,size:m.size,color:m.color,lastSeen:now,decId:decId};
     addLog('SYS','拓扑发现',`${m.role} [${hexS(decId)}] 入网`,'#eab308');
+  }else if(activeNodes[h].stale){
+    addLog('SYS','重新上线',`${m.role} [${hexS(decId)}] 已恢复`,'#22c55e');
   }
-  activeNodes[h].lastSeen=now;activeNodes[h].color=m.color;activeNodes[h].size=m.size;
+  activeNodes[h].lastSeen=now;activeNodes[h].stale=false;activeNodes[h].color=m.color;activeNodes[h].size=m.size;
   return h;
 }
 
@@ -454,7 +532,7 @@ function setLink(aHex,bHex,rssiVal,msgType,now){
   const linkId=`${lo}-${hi}`;
   // 所有链路默认虚线闲置，当前路由由 applyRouteHighlight 升级为高亮实线
   const oldRssi=activeLinks[linkId]?.rssi??null;
-  activeLinks[linkId]={source:lo,target:hi,rssi:rssiVal!==null&&rssiVal!==undefined?rssiVal:oldRssi,lineColor:'#64748b',lineWidth:1.2,lineType:'dashed',inRoute:false};
+  activeLinks[linkId]={source:lo,target:hi,rssi:rssiVal!==null&&rssiVal!==undefined?rssiVal:oldRssi,lineColor:'#64748b',lineWidth:1.2,lineType:'dashed',inRoute:false,lastUpdated:now};
   if(rssiVal!==null&&rssiVal!==undefined){
     linkRssiCache[linkId]=rssiVal;
     if(!linkRssiHistory[linkId])linkRssiHistory[linkId]=[];
@@ -481,11 +559,23 @@ function updateTopology(src,dest,msgType,pathId,count,stamps,relays,lastHopRssi)
     if(relays&&relays.length>0){
       let prevId=src;
       for(const rDec of relays){ensureNode(rDec,now);const lk=prevId<rDec?`${hex(prevId)}-${hex(rDec)}`:`${hex(rDec)}-${hex(prevId)}`;setLink(hex(prevId),hex(rDec),linkRssiCache[lk]??null,msgType,now);prevId=rDec;}
-      setLink(hex(prevId),destHex,lastHopRssi??null,msgType,now);
-    }else if((src===0x10&&dest===0x30)||(src===0x30&&dest===0x10)){setLink(srcHex,destHex,lastHopRssi??null,msgType,now);}
+      // ★ 末尾跳也优先用缓存 RSSI（组网时测的），避免 DATA 帧的 lastHopRssi 覆盖组网值
+      const finalLk=prevId<dest?`${hex(prevId)}-${hex(dest)}`:`${hex(dest)}-${hex(prevId)}`;
+      setLink(hex(prevId),destHex,linkRssiCache[finalLk]??lastHopRssi??null,msgType,now);
+    }else if((src===0x10&&dest===0x30)||(src===0x30&&dest===0x10)){
+      const dk='0x10-0x30';
+      setLink(srcHex,destHex,linkRssiCache[dk]??lastHopRssi??null,msgType,now);
+    }
   }
-  if(msgType===MSG_RREP&&relays!==undefined){currentRoute={pathId,relays:[...relays],updated:now};applyRouteHighlight(relays);}
-  updatePhaseIndicator(msgType===MSG_RREQ?'rreq':msgType===MSG_RREP?'rrep':msgType===MSG_DATA?'data':msgType===MSG_ACK?'ack':'idle');
+  // ★ RREP 仅记录路由信息，不立即高亮（等高亮仅在 ACK_CONFIRM 后）
+  if(msgType===MSG_RREP&&relays!==undefined){currentRoute={pathId,relays:[...relays],updated:now};}
+  // ★ ACK_CONFIRM → 通信周期完成，高亮成功路径；否则清除
+  if(msgType===MSG_ACK_CONFIRM){
+    if(currentRoute){applyRouteHighlight(currentRoute.relays||[]);}
+  }
+  // ★ 新一轮 RREQ → 清除旧高亮（等待新的成功确认）
+  if(msgType===MSG_RREQ){for(let k in activeLinks)activeLinks[k].inRoute=false;}
+  updatePhaseIndicator(msgType===MSG_RREQ?'rreq':msgType===MSG_RREP?'rrep':msgType===MSG_DATA?'data':msgType===MSG_ACK?'ack':msgType===MSG_ACK_CONFIRM?'ack_done':'idle');
   renderTopo();
   updateRssiChart();
   updateLinkStatsIfActive();
@@ -525,7 +615,7 @@ function renderNodeDetail(nodeHex){
   const content=document.getElementById('node-detail-content');
   empty.classList.add('hidden');content.classList.remove('hidden');
   const m=meta(n.decId||parseInt(nodeHex,16));
-  const idle=((Date.now()-n.lastSeen)/1000).toFixed(0);
+  const idle=n.lastSeen?((Date.now()-n.lastSeen)/1000).toFixed(0):-1;
   // 找出涉及该节点的链路
   let nodeLinks=[];
   for(let lk in activeLinks){
@@ -534,13 +624,13 @@ function renderNodeDetail(nodeHex){
   content.innerHTML=`
     <div class="flex items-center gap-3 mb-3">
       <div class="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold" style="background:${n.color}22;border:2px solid ${n.color};color:${n.color};">${nodeHex}</div>
-      <div><div class="font-bold text-sm">${m.role} <span style="color:var(--mut);">${m.en}</span></div><div class="text-xs" style="color:var(--mut);">活跃: ${idle}s 前</div></div>
+      <div><div class="font-bold text-sm">${m.role} <span style="color:var(--mut);">${m.en}</span></div><div class="text-xs" style="color:var(--mut);">${n.id==='PC'?'🖥 本地网关 · 始终在线':n.id==='0x10'&&!isSerialOpen?'⚠️ 串口未连接':idle<0?'⏳ 等待数据...':'活跃: '+idle+'s 前'}</div></div>
     </div>
     <div class="grid grid-cols-2 gap-2">
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">ID (HEX)</div><div class="font-mono text-sm">${nodeHex}</div></div>
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">ID (DEC)</div><div class="font-mono text-sm">${parseInt(nodeHex,16)}</div></div>
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">类别</div><div class="font-bold text-sm" style="color:${n.color};">${m.role}</div></div>
-      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">最后活跃</div><div class="text-sm">${idle}s 前</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">最后活跃</div><div class="text-sm">${n.id==='PC'?'始终在线':n.id==='0x10'&&!isSerialOpen?'未连接':idle<0?'暂无数据':idle+'s 前'}</div></div>
     </div>
     <div class="text-xs font-bold mt-2" style="color:var(--mut);">相关链路 (${nodeLinks.length})</div>
     ${nodeLinks.map(l=>`
@@ -671,10 +761,41 @@ async function triggerSimulate(){
   btn.innerHTML='🧪 模拟';btn.style.background='var(--purple)';
 }
 
-// ════════════════════ 垃圾回收 ════════════════════
+// ════════════════════ 垃圾回收 + 老化标记 ════════════════════
 setInterval(()=>{
   let dirty=false;const now=Date.now();
-  for(let id in activeNodes){if(id==='PC'||id==='0x10')continue;if(now-activeNodes[id].lastSeen>20000){delete activeNodes[id];for(let lk in activeLinks){if(activeLinks[lk].source===id||activeLinks[lk].target===id)delete activeLinks[lk];}dirty=true;addLog('SYS','离线',`${id} 超时 20s 已移除`,'#ef4444');}}
+  const STALE_LINK_MS=15000;   // 链路 15s 未更新 → 移除（>10s 通信间隔）
+  const STALE_NODE_MS=12000;   // 节点 12s 无活动 → 半透明（>10s 间隔）
+  const REMOVE_NODE_MS=25000;  // 节点 25s 无活动 → 彻底删除（>2个周期）
+
+  // 1. 移除过期链路（RSSI 不再更新 = 中继已不存在）
+  for(let lk in activeLinks){
+    if(lk==='PC-0x10')continue;
+    if(activeLinks[lk].lastUpdated && now-activeLinks[lk].lastUpdated>STALE_LINK_MS){
+      delete activeLinks[lk];delete linkRssiCache[lk];
+      dirty=true;
+    }
+  }
+
+  // 2. 老化/删除过期节点（同步清理其链路）
+  for(let id in activeNodes){
+    if(id==='PC')continue;
+    if(id==='0x10'&&isSerialOpen)continue;
+    const age=now-activeNodes[id].lastSeen;
+    if(age>REMOVE_NODE_MS){
+      delete activeNodes[id];
+      for(let lk in activeLinks){if(activeLinks[lk].source===id||activeLinks[lk].target===id){delete activeLinks[lk];delete linkRssiCache[lk];}}
+      dirty=true;addLog('SYS','离线',`${id} 超时已移除`,'#ef4444');
+    }else if(age>STALE_NODE_MS){
+      if(!activeNodes[id].stale){
+        activeNodes[id].stale=true;dirty=true;
+        // 节点变离线 → 立即移除其所有链路
+        for(let lk in activeLinks){if(activeLinks[lk].source===id||activeLinks[lk].target===id){delete activeLinks[lk];delete linkRssiCache[lk];}}
+      }
+    }else{
+      if(activeNodes[id].stale){activeNodes[id].stale=false;dirty=true;}
+    }
+  }
   if(dirty){renderTopo();updateRssiChart();}
 },4000);
 
@@ -684,8 +805,22 @@ let isSerialOpen=false,globalWs=null;
 function toggleSerial(){
   const port=document.getElementById('port-select').value,baud=document.getElementById('baud-select').value,btn=document.getElementById('btn-serial');
   if(!port){alert('请选择串口');return;}
-  if(!isSerialOpen){globalWs.send(JSON.stringify({action:'open_serial',port,baudrate:parseInt(baud)}));btn.innerHTML='⏹ 关闭串口';btn.style.background='#ef4444';isSerialOpen=true;}
-  else{globalWs.send(JSON.stringify({action:'close_serial'}));btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;}
+  if(!isSerialOpen){
+    globalWs.send(JSON.stringify({action:'open_serial',port,baudrate:parseInt(baud)}));
+    btn.innerHTML='⏹ 关闭串口';btn.style.background='#ef4444';isSerialOpen=true;
+    // 添加主节点到拓扑
+    const now=Date.now();
+    if(!activeNodes['0x10'])activeNodes['0x10']={id:'0x10',name:'主节点\n0x10',cat:0,size:60,color:'#f97316',lastSeen:now,decId:16};
+    activeLinks['PC-0x10']={source:'PC',target:'0x10',rssi:null,lineColor:'#0ea5e9',lineWidth:3,lineType:'solid',inRoute:false};
+    addLog('SYS','串口','正在连接 '+port+' ...','#22c55e');renderTopo();
+  }else{
+    globalWs.send(JSON.stringify({action:'close_serial'}));
+    btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;
+    // 移除主节点及相关链路
+    delete activeNodes['0x10'];
+    for(let lk in activeLinks){if(activeLinks[lk].source==='0x10'||activeLinks[lk].target==='0x10')delete activeLinks[lk];}
+    addLog('SYS','串口','串口已关闭','#eab308');renderTopo();
+  }
 }
 
 async function fetchPorts(){
@@ -707,8 +842,17 @@ function connectWS(){
     const d=JSON.parse(ev.data);
     if(d.type==='sys'){addLog('SYS','系统',d.msg,'#22c55e');return;}
     if(d.type==='sys_error'){addLog('SYS','错误',d.msg,'#ef4444');const btn=document.getElementById('btn-serial');btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;return;}
+    if(d.type==='route_fail'||d.type==='phase_timeout'){
+      currentRoute=null;
+      for(let k in activeLinks)activeLinks[k].inRoute=false;
+      const failPhase=d.phase||'ack';
+      updatePhaseIndicator(failPhase+'_fail');
+      addLog(d.phase?d.phase.toUpperCase():'ACK','传输失败',`pathId=${d.pathId}: ${d.msg}`,'#ef4444');
+      renderTopo();return;
+    }
     if(d.type==='stats'){updateStats(d.data);
-      if(d.data.currentRoute){currentRoute=d.data.currentRoute;applyRouteHighlight(currentRoute.relays||[]);renderTopo();}
+      // ★ 周期 stats 不触发路由高亮（高亮仅由 ACK_CONFIRM 触发）
+      if(d.data.currentRoute){currentRoute=d.data.currentRoute;}
       if(d.data.currentPhase)updatePhaseIndicator(d.data.currentPhase);
       if(d.data.rssiHistory){for(let lk in d.data.rssiHistory){if(!linkRssiHistory[lk])linkRssiHistory[lk]=[];d.data.rssiHistory[lk].forEach(p=>{if(!linkRssiHistory[lk].find(x=>Math.abs(x.time-p.t)<0.1))linkRssiHistory[lk].push({time:p.t,rssi:p.rssi});});if(linkRssiHistory[lk].length>120)linkRssiHistory[lk]=linkRssiHistory[lk].slice(-120);}updateRssiChart();}
       return;
@@ -733,9 +877,11 @@ function connectWS(){
       if(d.rssiStamps&&d.rssiStamps.length>0){const ss=d.rssiStamps.map(s=>`${s.id}:<b style="color:${rssiColor(s.rssi)};">${s.rssi}dBm</b>`).join(', ');detail+=`<br/>📶 印章: [${ss}]`;}
       if(d.relays&&d.relays.length>0){detail+=`<br/>🛤 路径: <b style="color:var(--green);">${d.relays.map(r=>hexS(r)).join(' → ')}</b>`;}
       if(d.relays&&d.relays.length===0&&d.msgType===MSG_RREP){detail+=`<br/>🛤 路径: <b style="color:var(--green);">★ 直达 DIRECT</b>`;}
+      if(d._retry){detail+=`<br/>🔄 重传: <b style="color:#ef4444;">第 ${d._retry} 次发送</b>`;}
       detail+=`<br/><span style="color:var(--mut);font-size:10px;">data: ${d.dataHex}</span>`;
-      addLog(m[0],m[0]+' '+m[1],detail,m[2]);
-      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{ensureNode(d.src,Date.now());if(d.dest!==0x00)ensureNode(d.dest,Date.now());renderTopo();}
+      const logTitle=m[0]+' '+m[1]+(d._retry?' (重传#'+d._retry+')':'');
+      addLog(m[0],logTitle,detail,m[2]);
+      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK||d.msgType===MSG_ACK_CONFIRM){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{ensureNode(d.src,Date.now());if(d.dest!==0x00)ensureNode(d.dest,Date.now());renderTopo();}
       if(d.stats)updateStats(d.stats);
     }
   };

@@ -14,6 +14,7 @@ const uint8_t MSG_RREQ       = 0x10;
 const uint8_t MSG_RREP       = 0x11;
 const uint8_t MSG_DATA       = 0x01;
 const uint8_t MSG_ACK        = 0x02;
+const uint8_t MSG_ACK_CONFIRM = 0x06;  // ACK 确认回执
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t FRAME_SIZE     = 16;
 
@@ -43,6 +44,7 @@ RouteEntry route = { DEST_ID, 0, {0,0}, 0, 0, false };
 uint8_t  pathIdCounter = 0;
 uint8_t  sampleCounter = 0;
 bool     dataPending   = false;
+uint8_t  rreqRetryCount = 0;      // RREQ 当前路径重试计数
 
 enum DiscState { IDLE, WAITING_RREP, WAITING_ACK };
 DiscState discState    = IDLE;
@@ -50,8 +52,9 @@ uint32_t  rreqSendTime = 0;
 uint32_t  ackSendTime  = 0;
 uint32_t  lastAction   = 0;       // 全局，ACK 后重置用
 const uint32_t RREP_TIMEOUT   = 2000;
-const uint32_t ACK_TIMEOUT    = 2000;
+const uint32_t ACK_TIMEOUT    = 3500;  // >= mainTerm 的 3×800ms + 回程余量
 const uint32_t ROUTE_MAX_AGE  = 10000;  // 10 秒路由老化（每轮 ACK 后主动清掉）
+const uint8_t  MAX_RREQ_RETRIES = 3;    // RREQ 最多重试次数（同一路径连续失败才视作不可达）
 
 // =============================================
 void setup() {
@@ -68,9 +71,9 @@ void setup() {
 
   Serial.print(F("Sender 0x"));
   Serial.print(MY_NODE_ID, HEX);
-  Serial.print(F(" → 0x"));
+  Serial.print(F(" ->0x"));
   Serial.print(DEST_ID, HEX);
-  Serial.println(F("  [AODV-Lite v2]  freq=530MHz SF7 Tx=17dBm"));
+  Serial.println(F(" OK  530MHz SF7"));
 }
 
 // =============================================
@@ -82,30 +85,24 @@ void loop() {
   if (discState == IDLE) {
     if (now - lastAction >= 10000) {
       lastAction = now;
+      rreqRetryCount = 0;  // ★ 新周期开始，重置重试计数
 
       if (!route.valid || (now - route.timestamp > ROUTE_MAX_AGE)) {
-        Serial.print(F("\n--- Route discovery #"));
-        Serial.print(pathIdCounter, DEC);
-        Serial.println(F(" ---"));
-        Serial.print(F("   route "));
-        Serial.println(route.valid ? F("EXPIRED (age>60s)") : F("INVALID (never set)"));
+        Serial.print(F("\n->RREQ #"));
+        Serial.println(pathIdCounter, DEC);
         sendRREQ();
         dataPending = true;
       } else {
-        Serial.print(F("\n--- Using cached route ---"));
-        Serial.print(F("  path="));
+        Serial.print(F("\n->DATA via "));
         if (route.relayCount == 0) {
           Serial.print(F("direct"));
         } else {
           for (uint8_t i = 0; i < route.relayCount; i++) {
-            Serial.print(F("0x"));
-            Serial.print(route.relays[i], HEX);
+            Serial.print(F("0x")); Serial.print(route.relays[i], HEX);
             Serial.write(' ');
           }
         }
-        Serial.print(F("  age="));
-        Serial.print((now - route.timestamp) / 1000, DEC);
-        Serial.println(F("s"));
+        Serial.println();
         sendData();
         dataPending = false;
       }
@@ -113,15 +110,30 @@ void loop() {
   }
   else if (discState == WAITING_RREP) {
     if (now - rreqSendTime > RREP_TIMEOUT) {
-      discState = IDLE;
-      Serial.println(F("RREP timeout. Will retry."));
+      if (rreqRetryCount < MAX_RREQ_RETRIES) {
+        // ★ 撞包导致 RREQ/RREP 丢失 → 递增退避重试
+        rreqRetryCount++;
+        Serial.print(F("RREP timeout retry #"));
+        Serial.print(rreqRetryCount, DEC);
+        Serial.print(F("/"));
+        Serial.println(MAX_RREQ_RETRIES, DEC);
+        delay(60 + rreqRetryCount * 120);  // 退避: 180ms, 300ms, 420ms（避开撞包窗口）
+        sendRREQ();
+      } else {
+        // ★ 连续多次失败 → 该路径不可达
+        discState = IDLE;
+        rreqRetryCount = 0;
+        route.valid = false;
+        lastAction = now;
+        Serial.println(F("RREP timeout (max retries) — path unreachable"));
+      }
     }
   }
   else if (discState == WAITING_ACK) {
     if (now - ackSendTime > ACK_TIMEOUT) {
       discState = IDLE;
       route.valid = false;  // ★ 路由可能失效，重新发现
-      Serial.println(F("ACK timeout. Route invalidated. Will retry."));
+      Serial.println(F("ACK timeout"));
     }
   }
 }
@@ -148,7 +160,7 @@ void sendRREQ() {
   discState    = WAITING_RREP;
   rreqSendTime = millis();
 
-  Serial.print(F("RREQ sent  pathId="));
+  Serial.print(F("RREQ tx pid="));
   Serial.println(frame.pathId, DEC);
 }
 
@@ -157,11 +169,8 @@ void checkForPacket() {
   int pktSize = LoRa.parsePacket();
   if (pktSize != FRAME_SIZE) {
     if (pktSize > 0) {
-      Serial.print(F("[NOISE] pktSize="));
-      Serial.print(pktSize, DEC);
-      Serial.print(F(" (expected "));
-      Serial.print(FRAME_SIZE, DEC);
-      Serial.println(F(")"));
+      Serial.print(F("!NOISE len="));
+      Serial.println(pktSize, DEC);
     }
     while (LoRa.available()) LoRa.read();
     return;
@@ -181,7 +190,7 @@ void checkForPacket() {
     return;  // 只关心 RREP 和 ACK
   }
   if (!verifyChecksum(&frame)) {
-    Serial.println(F("[FILTER] checksum FAIL"));
+    Serial.println(F("!CHK"));
     return;
   }
 
@@ -195,10 +204,12 @@ void checkForPacket() {
 // =============================================
 void handleRREPFrame(LoRaFrame* frame) {
   if (discState != WAITING_RREP) {
-    Serial.print(F("[ACCEPT] RREP arrived late (state="));
+    Serial.print(F("RREP late st="));
     Serial.print(discState, DEC);
-    Serial.println(F(") — accepting anyway"));
+    Serial.println(F(" accept"));
   }
+
+  rreqRetryCount = 0;  // ★ RREP 成功收到，重置重试计数
 
   route.destId     = frame->srcId;
   route.relayCount = frame->count;
@@ -209,55 +220,81 @@ void handleRREPFrame(LoRaFrame* frame) {
   route.valid      = true;
 
   int rssi = LoRa.packetRssi();
-  Serial.print(F("\n╔══════════════════════════════════════╗"));
-  Serial.print(F("\n║ RREP RECEIVED  pathId="));
+
+  // ★ 先发 DATA（等待 relay 完成 RREP 转发，时间按中继数递增）
+  // 1跳 relay=10ms退避+50ms TX ≈60ms; 2跳 relay=70ms退避+50ms TX ≈120ms
+  if (dataPending) {
+    dataPending = false;  // ★ 必须在 while 之前清除，防止循环内 RREP 重复触发
+    uint32_t waitMs = 20 + route.relayCount * 60;  // 0→20, 1→80, 2→140
+    uint32_t t0 = millis();
+    while (millis() - t0 < waitMs) {
+      checkForPacket();
+    }
+    sendData();
+  }
+
+  // 再打印日志
+  Serial.print(F("RREP pid="));
   Serial.print(frame->pathId, DEC);
-  Serial.print(F("  RSSI="));
+  Serial.print(F(" r="));
   Serial.print(rssi, DEC);
-  Serial.println(F(" dBm"));
-  Serial.print(F("║   route="));
+  Serial.print(F(" via="));
   if (route.relayCount == 0) {
-    Serial.print(F("★ DIRECT (no relays)"));
+    Serial.print(F("direct"));
   } else {
-    Serial.print(F("via "));
     for (uint8_t i = 0; i < route.relayCount; i++) {
-      Serial.print(F("0x"));
-      Serial.print(route.relays[i], HEX);
-      if (i < route.relayCount - 1) Serial.print(F(" → "));
+      Serial.print(F("0x")); Serial.print(route.relays[i], HEX);
+      if (i < route.relayCount - 1) Serial.write(',');
     }
   }
-  Serial.print(F("\n╚══════════════════════════════════════╝\n"));
-
-  if (dataPending) {
-    Serial.print(F("  → Sending DATA via this route...\n"));
-    sendData();
-    dataPending = false;
-  }
+  Serial.println();
   // 如果 dataPending 为 false 但收到了 RREP（重传等），忽略
 }
 
 // =============================================
 void handleACKFrame(LoRaFrame* frame) {
   if (discState != WAITING_ACK) {
-    Serial.print(F("[LATE] ACK arrived (state="));
+    Serial.print(F("ACK late st="));
     Serial.print(discState, DEC);
-    Serial.println(F(") — ignoring"));
+    Serial.println(F(" ignore"));
     return;
   }
 
   int rssi = LoRa.packetRssi();
-  Serial.print(F("\n╔══════════════════════════════════════╗"));
-  Serial.print(F("\n║ ✅ ACK RECEIVED  pathId="));
-  Serial.print(frame->pathId, DEC);
-  Serial.print(F("  RSSI="));
-  Serial.print(rssi, DEC);
-  Serial.println(F(" dBm"));
-  Serial.print(F("║   Delivery confirmed!"));
-  Serial.print(F("\n╚══════════════════════════════════════╝\n"));
 
-  discState  = IDLE;
-  lastAction = millis();   // ★ 启动 3 秒等待
-  route.valid = false;     // ★ 每次传输后强制重新发现，确保路径实时准确
+  // ★ 先发 ACK_CONFIRM（等待 relay 完成 ACK 转发，时间按中继数递增）
+  discState  = IDLE;       // ★ 必须在 while 之前，防止循环内 ACK 重复触发
+  lastAction = millis();
+  route.valid = false;
+  {
+    uint32_t waitMs = 40 + frame->count * 40;  // 1跳→80ms, 2跳→120ms
+    uint32_t t0 = millis();
+    while (millis() - t0 < waitMs) {
+      checkForPacket();
+    }
+  }
+
+  LoRaFrame confirm;
+  memset(&confirm, 0, FRAME_SIZE);
+  confirm.head[0] = FRAME_HEADER_0;
+  confirm.head[1] = FRAME_HEADER_1;
+  confirm.srcId   = MY_NODE_ID;
+  confirm.destId  = frame->srcId;
+  confirm.msgType = MSG_ACK_CONFIRM;
+  confirm.pathId  = frame->pathId;
+  confirm.count   = frame->count;
+  if (frame->count > 0) memcpy(confirm.data, frame->data, frame->count);
+  calcChecksum(&confirm);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&confirm, FRAME_SIZE);
+  LoRa.endPacket();
+
+  // 再打印日志（不阻塞 ACK_CONFIRM）
+  Serial.print(F("ACK ok pid="));
+  Serial.print(frame->pathId, DEC);
+  Serial.print(F(" r="));
+  Serial.print(rssi, DEC);
+  Serial.println(F(" v"));
 }
 
 // =============================================
@@ -285,9 +322,9 @@ void sendData() {
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
   LoRa.endPacket();
 
-  Serial.print(F("DATA sent  ctr="));
+  Serial.print(F("DATA tx ctr="));
   Serial.print(sampleCounter - 1, DEC);
-  Serial.print(F("  relays="));
+  Serial.print(F(" via="));
   Serial.println(route.relayCount, DEC);
 
   // ★ 等待 ACK 确认

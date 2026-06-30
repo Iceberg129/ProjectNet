@@ -13,6 +13,7 @@ const uint8_t MSG_RREQ       = 0x10;
 const uint8_t MSG_RREP       = 0x11;
 const uint8_t MSG_DATA       = 0x01;
 const uint8_t MSG_ACK        = 0x02;
+const uint8_t MSG_ACK_CONFIRM = 0x06;  // ACK 确认回执（超时重传用）
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t MAX_STAMPS     = 4;
 const uint8_t FRAME_SIZE     = 16;
@@ -44,10 +45,19 @@ Candidate candidates[MAX_CANDIDATES];
 uint8_t  candidateCount = 0;
 uint8_t  currentPathId  = 0xFF;
 uint32_t windowStart    = 0;
-const uint32_t COLLECT_WINDOW = 500;   // ★ 150→500ms（串口打印会阻塞收包）
+const uint32_t COLLECT_WINDOW = 500;   // ★ 150->500ms（串口打印会阻塞收包）
 
 bool     jammingMode  = false;
 uint32_t lastJamSend  = 0;
+
+// ★ DATA 去重：同一 (srcId, pathId, data[off], data[off+1]) 2秒内不重复处理
+#define DATA_DEDUP_MS 2000
+struct DataRecord {
+  uint8_t  srcId, pathId;
+  uint8_t  payload[2];
+  uint32_t timestamp;
+};
+DataRecord lastData = { 0, 0, {0,0}, 0 };
 
 // ★ 全局统计（帮助诊断中继是否到达）
 uint16_t stat_totalHeard   = 0;
@@ -72,10 +82,9 @@ void setup() {
 
   memset(candidates, 0, sizeof(candidates));
 
-  Serial.print(F("Dest 0x"));
+  Serial.print(F("Main 0x"));
   Serial.print(MY_NODE_ID, HEX);
-  Serial.println(F(" ready. [AODV-Lite v2]"));
-  Serial.println(F("'j'=jammer  window=150ms  freq=530MHz SF7 Tx=17dBm"));
+  Serial.println(F(" OK  530MHz SF7"));
 }
 
 // =============================================
@@ -115,7 +124,7 @@ void loop() {
     handlePacket();
   }
 
-  // 窗口到期 → 裁决
+  // 窗口到期 -> 裁决
   if (candidateCount > 0 && (millis() - windowStart >= COLLECT_WINDOW)) {
     evaluateAndReply();
   }
@@ -137,17 +146,10 @@ void handlePacket() {
   // 1. 长度校验
   if (pktSize != FRAME_SIZE) {
     stat_badSize++;
-    Serial.print(F("[BAD LEN] len="));
+    Serial.print(F("!LEN "));
     Serial.print(pktSize, DEC);
-    Serial.print(F(" RSSI="));
-    Serial.print(rssi, DEC);
-    // 打印前几个字节帮助诊断
-    Serial.print(F(" raw="));
-    for (uint8_t i = 0; i < readLen && i < 6; i++) {
-      if (raw[i] < 0x10) Serial.write('0');
-      Serial.print(raw[i], HEX);
-    }
-    Serial.println();
+    Serial.print(F(" r="));
+    Serial.println(rssi, DEC);
     return;
   }
 
@@ -156,12 +158,8 @@ void handlePacket() {
   // 2. 魔术字校验
   if (rx->head[0] != FRAME_HEADER_0 || rx->head[1] != FRAME_HEADER_1) {
     stat_badMagic++;
-    Serial.print(F("[BAD MAGIC] "));
-    Serial.print(rx->head[0], HEX); Serial.write(' ');
-    Serial.print(rx->head[1], HEX);
-    Serial.print(F(" RSSI="));
-    Serial.print(rssi, DEC);
-    Serial.println();
+    Serial.print(F("!MAGIC r="));
+    Serial.println(rssi, DEC);
     return;
   }
 
@@ -179,21 +177,12 @@ void handlePacket() {
   // 4. 校验和
   if (!verifyChecksum(rx)) {
     stat_badChecksum++;
-    Serial.print(F("[BAD CHK] type=0x"));
+    Serial.print(F("!CHK t=0x"));
     Serial.print(rx->msgType, HEX);
-    Serial.print(F(" src=0x"));
+    Serial.print(F(" s=0x"));
     Serial.print(rx->srcId, HEX);
-    Serial.print(F(" cnt="));
-    Serial.print(rx->count, DEC);
-    Serial.print(F(" RSSI="));
-    Serial.print(rssi, DEC);
-    // ★ 打印 data 区前几个字节帮助诊断
-    Serial.print(F(" data="));
-    for (uint8_t i = 0; i < rx->count * 2 && i < 6; i++) {
-      if (rx->data[i] < 0x10) Serial.write('0');
-      Serial.print(rx->data[i], HEX);
-    }
-    Serial.println();
+    Serial.print(F(" r="));
+    Serial.println(rssi, DEC);
     return;
   }
 
@@ -217,9 +206,8 @@ void handlePacket() {
   }
   Serial.println();
 
-  // ★ 将原始帧转发给 PC UI（二进制，16字节）
-  // 在 data[7] 塞入末跳 RSSI（供 Python UI 显示链路信号强度）
-  {
+  // ★ 将帧转发给 PC UI（ACK_CONFIRM 由 sendACK 转发，此处跳过避免重复）
+  if (rx->msgType != MSG_ACK_CONFIRM) {
     uint8_t fwd[FRAME_SIZE];
     memcpy(fwd, raw, FRAME_SIZE);
     if (rx->count < 4) fwd[14] = (uint8_t)(int8_t)rssi;
@@ -237,15 +225,15 @@ void handlePacket() {
 void handleRREQ(LoRaFrame* rx) {
   int rssi = LoRa.packetRssi();
 
-  // 新 pathId → 重置窗口
+  // 新 pathId -> 重置窗口
   if (rx->pathId != currentPathId) {
     candidateCount = 0;
     currentPathId  = rx->pathId;
     windowStart    = millis();
     memset(candidates, 0, sizeof(candidates));
-    Serial.print(F("\n── pathId="));
+    Serial.print(F("\npid="));
     Serial.print(rx->pathId, DEC);
-    Serial.println(F(" ──"));
+    Serial.println();
   }
 
   // ★ 去重：同一 (pathId, srcId, stampCount, relayIds) 只保留 bottleneck 最好的
@@ -261,7 +249,7 @@ void handleRREQ(LoRaFrame* rx) {
         sameRelays = true;
         for (uint8_t j = 0; j < rx->count; j++) {
           if (candidates[i].stampsData[j * 2] != rx->data[j * 2]) {
-            sameRelays = false; break;  // 不同中继 → 不同路径
+            sameRelays = false; break;  // 不同中继 -> 不同路径
           }
         }
       }
@@ -277,8 +265,7 @@ void handleRREQ(LoRaFrame* rx) {
         memcpy(candidates[i].stampsData, rx->data, 8);
         candidates[i].lastHopRssi    = (int8_t)rssi;
         candidates[i].bottleneckRssi = newBottleneck;
-        Serial.print(F("  update bneck="));
-        Serial.println(newBottleneck, DEC);
+        // bottleneck updated (silent)
       }
       return;
     }
@@ -370,63 +357,25 @@ void evaluateAndReply() {
     relayCount = 0;
   }
 
-  // ─── 路线图 ───
-  Serial.print(F("\n── pathId="));
+  // ★ 精简：只打印获胜路径
+  Serial.print(F("  pathId="));
   Serial.print(currentPathId, DEC);
-  Serial.print(F(" ["));
-  Serial.print(candidateCount, DEC);
-  Serial.println(F("] ──"));
-
-  for (uint8_t i = 0; i < candidateCount; i++) {
-    Candidate* c = &candidates[i];
-    bool win = (c == best);
-
-    Serial.print(win ? F("▶ "):F("  "));
-    Serial.print(F("0x")); Serial.print(c->srcId, HEX);
-
-    if (c->stampCount == 0) {
-      // 直达: 0x30 -----[-45]-----> [C]
-      uint8_t n = (uint8_t)(-c->lastHopRssi / 10);
-      Serial.write(' ');
-      for (uint8_t k = 0; k < n; k++) Serial.write('-');
-      Serial.print(F("[-")); Serial.print(-c->lastHopRssi, DEC); Serial.print(F("]"));
-      for (uint8_t k = 0; k < n; k++) Serial.write('-');
-      Serial.print(F("> [C]"));
-    } else {
-      // 中继: 0x30 ---[-50]---> 0x21 ---[-42]---> [C]
-      for (uint8_t j = 0; j < c->stampCount; j++) {
-        int8_t hopRssi = (int8_t)c->stampsData[j * 2 + 1];
-        uint8_t n = (uint8_t)(-hopRssi / 10);
-        Serial.write(' ');
-        for (uint8_t k = 0; k < n; k++) Serial.write('-');
-        Serial.print(F("[-")); Serial.print(-hopRssi, DEC); Serial.print(F("]"));
-        for (uint8_t k = 0; k < n; k++) Serial.write('-');
-        Serial.print(F("> 0x")); Serial.print(c->stampsData[j * 2], HEX);
-      }
-      // 末跳 → mainTerm
-      uint8_t n = (uint8_t)(-c->lastHopRssi / 10);
-      Serial.write(' ');
-      for (uint8_t k = 0; k < n; k++) Serial.write('-');
-      Serial.print(F("[-")); Serial.print(-c->lastHopRssi, DEC); Serial.print(F("]"));
-      for (uint8_t k = 0; k < n; k++) Serial.write('-');
-      Serial.print(F("> [C]"));
+  Serial.print(F(" win="));
+  if (relayCount == 0) {
+    Serial.print(F("direct b="));
+    Serial.print(-best->bottleneckRssi, DEC);
+  } else {
+    for (uint8_t i = 0; i < relayCount; i++) {
+      Serial.print(F("0x")); Serial.print(relays[i], HEX);
+      if (i < relayCount - 1) Serial.write(',');
     }
-
-    // 瓶颈 + 选中标记
-    Serial.print(F("  b=-"));
-    Serial.print(-c->bottleneckRssi, DEC);
-    if (win) {
-      Serial.print(F(" ★"));
-      if (useRelay && bestDirectIdx >= 0) {
-        Serial.print(F("  -"));
-        Serial.print(-bestRelayedRssi, DEC);
-        Serial.print(bestRelayedRssi >= bestDirectRssi ? F("≥"):F("<"));
-        Serial.print(F("-"));
-        Serial.print(-bestDirectRssi, DEC);
-      }
-    }
-    Serial.println();
+    Serial.print(F(" b="));
+    Serial.print(-best->bottleneckRssi, DEC);
   }
+  if (useRelay && bestDirectIdx >= 0) {
+    Serial.print(bestRelayedRssi >= bestDirectRssi ? F(" >=dir"):F(" <dir"));
+  }
+  Serial.println();
 
   sendRREP(best->srcId, best->pathId, relayCount, relays);
 
@@ -458,13 +407,11 @@ void sendRREP(uint8_t destId, uint8_t pathId,
   // 转发给 PC UI（相位指示器需要看到 RREP 帧）
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
 
-  Serial.print(F("RREP sent → 0x"));
+  Serial.print(F("RREP ->0x"));
   Serial.print(destId, HEX);
-  Serial.print(F("  pathId="));
+  Serial.print(F(" pid="));
   Serial.print(pathId, DEC);
-  Serial.print(F("  relays="));
-  Serial.print(relayCount, DEC);
-  Serial.print(relayCount == 0 ? F(" (DIRECT)") : F(" (RELAYED)"));
+  Serial.print(relayCount == 0 ? F(" direct"):F(" via"));
   Serial.println();
 }
 
@@ -476,47 +423,70 @@ void handleDATA(LoRaFrame* rx) {
   bool isBeacon = (rx->data[0] == 0xBE && rx->data[1] == 0xAC);
 
   if (isBeacon) {
-    Serial.print(F("\n🔔 BEACON from Relay 0x"));
+    Serial.print(F("BEACON 0x"));
     Serial.print(rx->srcId, HEX);
-    Serial.print(F("  RSSI="));
-    Serial.print(rssi, DEC);
-    Serial.println(F(" dBm  ← relay→mainTerm link is ALIVE!"));
+    Serial.print(F(" r="));
+    Serial.println(rssi, DEC);
     return;
   }
 
-  Serial.print(F("\n<<< DATA from 0x"));
-  Serial.print(rx->srcId, HEX);
-
-  if (rx->count == 0) {
-    Serial.print(F(" (direct)"));
-  } else {
-    Serial.print(F(" via "));
-    for (uint8_t i = 0; i < rx->count && i < MAX_RELAYS; i++) {
-      if (i > 0) Serial.write(',');
-      Serial.print(F("0x"));
-      Serial.print(rx->data[i], HEX);
+  // ★ DATA 去重：同一 (srcId, pathId, payload) 在 2s 内的重复帧直接忽略
+  {
+    uint8_t off = rx->count;
+    uint8_t p0 = (off < 8) ? rx->data[off] : 0;
+    uint8_t p1 = (off + 1 < 8) ? rx->data[off + 1] : 0;
+    if (lastData.srcId   == rx->srcId &&
+        lastData.pathId  == rx->pathId &&
+        lastData.payload[0] == p0 &&
+        lastData.payload[1] == p1 &&
+        millis() - lastData.timestamp < DATA_DEDUP_MS) {
+      Serial.print(F("DATA dup s=0x")); Serial.print(rx->srcId, HEX);
+      Serial.print(F(" pid=")); Serial.print(rx->pathId, DEC);
+      Serial.print(F(" r=")); Serial.println(rssi, DEC);
+      return;
     }
+    lastData.srcId   = rx->srcId;
+    lastData.pathId  = rx->pathId;
+    lastData.payload[0] = p0;
+    lastData.payload[1] = p1;
+    lastData.timestamp = millis();
   }
 
-  Serial.print(F("  RSSI="));
-  Serial.print(rssi, DEC);
-  Serial.print(F(" dBm  payload="));
+  // ★ 中继路径：延迟 ACK，等中继完成 DATA 转发并回到 RX 模式
+  // 中继退避 10~70ms + 空中 50ms → 需等待 60~120ms
+  if (rx->count > 0) {
+    delay(80 + rx->count * 30);  // 1跳→110ms, 2跳→140ms
+  }
+  sendACK(rx->srcId, rx->pathId, rx->count, rx->data);
+
+  // 再打印日志
+  Serial.print(F("DATA s=0x")); Serial.print(rx->srcId, HEX);
+  if (rx->count > 0) {
+    Serial.print(F(" via="));
+    for (uint8_t i = 0; i < rx->count && i < MAX_RELAYS; i++) {
+      Serial.print(F("0x")); Serial.print(rx->data[i], HEX);
+      if (i < rx->count-1 && i < MAX_RELAYS-1) Serial.write(',');
+    }
+  }
+  Serial.print(F(" r=")); Serial.print(rssi, DEC);
+  Serial.print(F(" pay="));
   for (uint8_t i = rx->count; i < rx->count + 2 && i < 8; i++) {
     if (rx->data[i] < 0x10) Serial.write('0');
     Serial.print(rx->data[i], HEX);
   }
   Serial.println();
-
-  // ★ 发送 ACK 确认
-  sendACK(rx->srcId, rx->pathId, rx->count, rx->data);
 }
 
 // =============================================
+// ★ ACK 超时重传（最多 3 次，等待 sender 回 ACK_CONFIRM）
+// =============================================
 void sendACK(uint8_t destId, uint8_t pathId,
              uint8_t relayCount, uint8_t* relays) {
+  const uint32_t ACK_TIMEOUT_MS = 800;   // 等待 ACK_CONFIRM 的超时（含 relay 转发+串口开销）
+  const uint8_t  ACK_MAX_RETRY  = 3;
+
   LoRaFrame frame;
   memset(&frame, 0, FRAME_SIZE);
-
   frame.head[0] = FRAME_HEADER_0;
   frame.head[1] = FRAME_HEADER_1;
   frame.srcId   = MY_NODE_ID;
@@ -525,31 +495,53 @@ void sendACK(uint8_t destId, uint8_t pathId,
   frame.pathId  = pathId;
   frame.count   = relayCount;
   if (relayCount > 0) memcpy(frame.data, relays, relayCount);
-
   calcChecksum(&frame);
 
-  // 转发给 PC UI（相位指示器需要看到 ACK 帧）
-  Serial.write((uint8_t*)&frame, FRAME_SIZE);
-
-  // ★ 发 3 份提高可靠性（ACK 是关键确认，不容丢失）
-  for (uint8_t i = 0; i < 3; i++) {
+  for (uint8_t attempt = 0; attempt < ACK_MAX_RETRY; attempt++) {
+    // 发送 ACK
     LoRa.beginPacket();
     LoRa.write((uint8_t*)&frame, FRAME_SIZE);
     LoRa.endPacket();
-    if (i < 2) delay(80);  // 80ms 间隔，确保 relay 转发完上一份并切回 RX
-  }
 
-  Serial.print(F("  ACK sent → 0x"));
-  Serial.print(destId, HEX);
-  if (relayCount > 0) {
-    Serial.print(F(" via "));
-    for (uint8_t i = 0; i < relayCount && i < MAX_RELAYS; i++) {
-      Serial.print(F("0x"));
-      Serial.print(relays[i], HEX);
-      Serial.write(' ');
+    // 转发原始帧给 PC UI（必需，之后立即开始 polling）
+    Serial.write((uint8_t*)&frame, FRAME_SIZE);
+
+    // ★ 立即轮询 ACK_CONFIRM（串口打印移到结果确定后）
+    uint32_t t0 = millis();
+    bool confirmed = false;
+    LoRaFrame rx;
+    while (millis() - t0 < ACK_TIMEOUT_MS) {
+      int pktSize = LoRa.parsePacket();
+      if (pktSize == FRAME_SIZE) {
+        LoRa.readBytes((uint8_t*)&rx, FRAME_SIZE);
+        if (rx.head[0] == FRAME_HEADER_0 && rx.head[1] == FRAME_HEADER_1 &&
+            rx.msgType == MSG_ACK_CONFIRM && rx.srcId == destId &&
+            rx.pathId == pathId && verifyChecksum(&rx)) {
+          confirmed = true;
+          break;
+        }
+      }
+      while (LoRa.available()) LoRa.read();
+    }
+
+    // 结果确定后再打印（不阻塞 polling）
+    Serial.print(F("ACK #"));
+    Serial.print(attempt + 1, DEC);
+    Serial.print(F(" ->0x"));
+    Serial.print(destId, HEX);
+
+    if (confirmed) {
+      Serial.println(F(" ok"));
+      Serial.write((uint8_t*)&rx, FRAME_SIZE);
+      break;
+    }
+
+    if (attempt < ACK_MAX_RETRY - 1) {
+      Serial.println(F(" retry"));
+    } else {
+      Serial.println(F(" fail"));
     }
   }
-  Serial.println();
 }
 
 // =============================================
