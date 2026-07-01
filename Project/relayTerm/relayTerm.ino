@@ -22,6 +22,10 @@ const uint8_t MSG_JOIN_ACK = 0x21;
 const uint8_t MSG_JOIN_REJ = 0x22;
 const uint8_t MSG_CMD = 0x04;
 const uint8_t MSG_CMD_ACK = 0x05;
+const uint8_t MSG_CMD_PREPARE = 0x0A;
+const uint8_t MSG_CMD_READY   = 0x0B;
+const uint8_t MSG_CMD_COMMIT  = 0x0C;
+const uint8_t BROADCAST_ID    = 0xFF;
 const uint8_t MSG_HB       = 0x03;   // heartbeat
 const uint8_t MSG_KICK     = 0x08;   // 踢出命令
 const uint8_t MSG_UNKICK   = 0x09;   // 恢复命令
@@ -68,6 +72,10 @@ struct FwdRecord {
 };
 FwdRecord fwdHist[FWD_HISTORY];
 uint8_t  fwdHistIdx = 0;
+// Two-phase commit -- pending channel switch parameters
+bool     pendingReady = false;
+uint16_t pendingFreq  = 530;
+uint8_t  pendingSf    = 7;
 
 bool wasForwarded(uint8_t srcId, uint8_t destId, uint8_t pathId, uint8_t msgType) {
   for (uint8_t i = 0; i < FWD_HISTORY; i++) {
@@ -288,7 +296,7 @@ void handlePacket() {
 
   if (rxFrame.head[0] != FRAME_HEADER_0 || rxFrame.head[1] != FRAME_HEADER_1) {
     ignore = true; reason = "bad magic";
-  } else if (rxFrame.destId == MY_NODE_ID) {
+  } else if (rxFrame.destId == MY_NODE_ID && rxFrame.msgType != MSG_CMD_PREPARE && rxFrame.msgType != MSG_CMD_COMMIT) {
     ignore = true; reason = "dest is me";
   } else if (!verifyChecksum(&rxFrame)) {
     ignore = true; reason = "checksum fail";
@@ -304,6 +312,8 @@ void handlePacket() {
       case MSG_JOIN_ACK:
       case MSG_JOIN_REQ:
       case MSG_CMD_ACK:   handleCMD();            break;
+      case MSG_CMD_PREPARE:
+      case MSG_CMD_COMMIT: handleTwoPhase(); break;
       case MSG_CMD:
       case MSG_ACK:   handleACK();       break;
       case MSG_ACK_CONFIRM: handleACK(); break;
@@ -462,6 +472,90 @@ void handleCMD() {
   markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
   uint16_t backoff = (MY_NODE_ID & 0x0F) * 40 + 20;
   enqueueForward(&rxFrame, backoff, 0, F("CMD"));
+}
+
+// =============================================
+// Two-phase commit: PREPARE (save+reply READY) / COMMIT (apply switch)
+// =============================================
+void handleTwoPhase() {
+  uint8_t msgType = rxFrame.msgType;
+  uint16_t freq = ((uint16_t)rxFrame.data[0] << 8) | rxFrame.data[1];
+  uint8_t  sf   = rxFrame.data[2];
+  uint8_t  ttl  = rxFrame.data[3];
+  int rssi = LoRa.packetRssi();
+
+  if (msgType == MSG_CMD_PREPARE) {
+    // === Phase 1: PREPARE ===
+    Serial.print(F("PREPARE F=")); Serial.print(freq, DEC);
+    Serial.print(F(" SF")); Serial.print(sf, DEC);
+    Serial.print(F(" TTL=")); Serial.print(ttl, DEC);
+    Serial.print(F(" r=")); Serial.println(rssi, DEC);
+
+    uint8_t status = 0;
+    if (freq < 137 || freq > 1020) status = 1;
+    else if (sf < 7 || sf > 12)    status = 2;
+
+    if (status == 0) {
+      pendingFreq  = freq;
+      pendingSf    = sf;
+      pendingReady = true;
+    }
+
+    // Reply READY to mainTerm
+    LoRaFrame ack;
+    memset(&ack, 0, FRAME_SIZE);
+    ack.head[0] = FRAME_HEADER_0;
+    ack.head[1] = FRAME_HEADER_1;
+    ack.srcId   = MY_NODE_ID;
+    ack.destId  = 0x10;
+    ack.msgType = MSG_CMD_READY;
+    ack.data[0] = status;
+    calcChecksum(&ack);
+    LoRa.beginPacket();
+    LoRa.write((uint8_t*)&ack, FRAME_SIZE);
+    LoRa.endPacket();
+    Serial.print(F("READY tx status="));
+    Serial.println(status, DEC);
+
+    // Forward PREPARE (TTL limit)
+    if (ttl > 1) {
+      rxFrame.data[3] = ttl - 1;
+      calcChecksum(&rxFrame);
+      if (!wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
+        markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
+        uint16_t backoff = (MY_NODE_ID & 0x0F) * 40 + 20;
+        enqueueForward(&rxFrame, backoff, rssi, F("PREPARE"));
+      }
+    }
+  }
+  else if (msgType == MSG_CMD_COMMIT) {
+    // === Phase 2: COMMIT ===
+    Serial.print(F("COMMIT F=")); Serial.print(freq, DEC);
+    Serial.print(F(" SF")); Serial.print(sf, DEC);
+    Serial.print(F(" TTL=")); Serial.print(ttl, DEC);
+    Serial.print(F(" r=")); Serial.println(rssi, DEC);
+
+    if (pendingReady) {
+      LoRa.begin(freq * 1000000UL);
+      LoRa.setSpreadingFactor(sf);
+      LoRa.setTxPower(17);
+      pendingReady = false;
+      Serial.println(F("COMMIT applied"));
+    } else {
+      Serial.println(F("COMMIT ignored (no PREPARE)"));
+    }
+
+    // Forward COMMIT (TTL limit)
+    if (ttl > 1) {
+      rxFrame.data[3] = ttl - 1;
+      calcChecksum(&rxFrame);
+      if (!wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
+        markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
+        uint16_t backoff = (MY_NODE_ID & 0x0F) * 40 + 20;
+        enqueueForward(&rxFrame, backoff, rssi, F("COMMIT"));
+      }
+    }
+  }
 }
 
 // =============================================

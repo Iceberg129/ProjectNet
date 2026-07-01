@@ -13,16 +13,19 @@ MSG_HEARTBEAT = 0x03; MSG_CMD = 0x04; MSG_CMD_ACK = 0x05
 MSG_ACK_CONFIRM = 0x06
 MSG_KICK = 0x08; MSG_UNKICK = 0x09
 MSG_JOIN_REQ = 0x20; MSG_JOIN_ACK = 0x21; MSG_JOIN_REJ = 0x22
+MSG_CMD_PREPARE = 0x0A; MSG_CMD_READY = 0x0B; MSG_CMD_COMMIT = 0x0C
 MSG_NAMES = {MSG_RREQ:"RREQ",MSG_RREP:"RREP",MSG_DATA:"DATA",MSG_ACK:"ACK",
              MSG_HEARTBEAT:"HB",MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",
              MSG_KICK:"KICK",MSG_UNKICK:"UNKICK",
-             MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
-             MSG_ACK_CONFIRM:"ACK_CFM"}
+             MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
+             MSG_ACK_CONFIRM:"ACK_CFM",
+             MSG_CMD_PREPARE:"PREPARE",MSG_CMD_READY:"READY",MSG_CMD_COMMIT:"COMMIT"}
 MSG_ZH    = {MSG_RREQ:"路由发现",MSG_RREP:"路由应答",MSG_DATA:"数据传输",MSG_ACK:"确认应答",
              MSG_HEARTBEAT:"心跳",MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",
              MSG_KICK:"踢出命令",MSG_UNKICK:"恢复命令",
-             MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
-             MSG_ACK_CONFIRM:"ACK确认回执"}
+             MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
+             MSG_ACK_CONFIRM:"ACK确认回执",
+             MSG_CMD_PREPARE:"信道准备",MSG_CMD_READY:"信道就绪",MSG_CMD_COMMIT:"信道切换"}
 
 NODE_ROLES = {
     0x10: {"role":"主节点","en":"mainTerm","color":"#f97316","size":60},
@@ -101,6 +104,7 @@ class StatsTracker:
         elif msg_type == MSG_JOIN_ACK:  pass  # 入网允许不计数
         elif msg_type == MSG_JOIN_REJ:  pass  # 入网拒绝不计数
         elif msg_type == MSG_HEARTBEAT:  self._handle_heartbeat(src, dest, count); pass
+        elif msg_type in (MSG_CMD_PREPARE, MSG_CMD_READY, MSG_CMD_COMMIT): pass
         else:                           self.bad  += 1
 
         # 链路 RSSI（从印章逐跳解析）
@@ -524,6 +528,54 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                             if last_hop is not None:
                                 frame_msg["lastHopRssi"] = last_hop
                             asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(frame_msg)), loop)
+                            # === Two-phase commit and channel switch handling ===
+                            if msg_type == MSG_CMD_READY:
+                                # READY: data[0]=status
+                                status = data_bytes[0]
+                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                    "type": "two_phase_progress",
+                                    "phase": "ready",
+                                    "nodeId": src,
+                                    "nodeHex": f"0x{src:02X}",
+                                    "status": status,
+                                    "msg": f"节点 0x{src:02X} {'已就绪' if status==0 else '参数不支持'}"
+                                })), loop)
+                            elif msg_type == MSG_CMD_PREPARE:
+                                freq = (data_bytes[0] << 8) | data_bytes[1]
+                                sf = data_bytes[2]
+                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                    "type": "two_phase_progress",
+                                    "phase": "prepare",
+                                    "freq": freq,
+                                    "sf": sf,
+                                    "msg": f"主节点发起全网信道切换: {freq}MHz SF{sf}"
+                                })), loop)
+                            elif msg_type == MSG_CMD_COMMIT:
+                                if data_bytes[0] == 0x01:
+                                    # 切换结果帧
+                                    readyMask = data_bytes[1]
+                                    onlineMask = data_bytes[2]
+                                    total = 3
+                                    onlineCount = bin(onlineMask).count("1")
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "channel_switch_result",
+                                        "success": True,
+                                        "onlineCount": onlineCount,
+                                        "totalNodes": total,
+                                        "readyMask": readyMask,
+                                        "onlineMask": onlineMask,
+                                        "msg": f"切换完成: {onlineCount}/{total} 节点在线"
+                                    })), loop)
+                                else:
+                                    freq = (data_bytes[0] << 8) | data_bytes[1]
+                                    sf = data_bytes[2]
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "two_phase_progress",
+                                        "phase": "commit",
+                                        "freq": freq,
+                                        "sf": sf,
+                                        "msg": "正在执行全网信道切换..."
+                                    })), loop)
                             del buffer[:FRAME_SIZE]
                         except Exception:
                             del buffer[0:1]

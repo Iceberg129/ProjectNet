@@ -1,6 +1,6 @@
 // =============================================
 // mainTerm.ino – 主节点 C（AODV-Lite 终点裁决 修复版）
-// 适用于 Arduino Uno + LoRa SX1278 
+// 适用于 Arduino Uno + LoRa SX1278
 // =============================================
 #include <SPI.h>
 #include <LoRa.h>
@@ -23,6 +23,10 @@ const uint8_t MSG_JOIN_ACK   = 0x21;
 const uint8_t MSG_JOIN_REQ   = 0x20;
 const uint8_t MSG_KICK       = 0x08;   // 踢出命令
 const uint8_t MSG_UNKICK     = 0x09;   // 恢复命令
+const uint8_t MSG_CMD_PREPARE = 0x0A;  // 两阶段提交 Phase1: 准备
+const uint8_t MSG_CMD_READY   = 0x0B;  // 两阶段提交 Phase1: 节点就绪
+const uint8_t MSG_CMD_COMMIT  = 0x0C;  // 两阶段提交 Phase2: 执行切换
+const uint8_t BROADCAST_ID    = 0xFF;  // 全网广播地址
 const uint8_t MAX_STAMPS     = 4;
 const uint8_t FRAME_SIZE     = 16;
 
@@ -81,6 +85,17 @@ uint32_t nodeLastSeen[256];   // last heartbeat timestamp per node ID
 bool     nodeOnline[256];     // online status per node ID
 const uint32_t HB_TIMEOUT = 24000;  // offline after 24s (2 missed HBs)
 uint32_t lastJamSend  = 0;
+// ★ 两阶段提交 — 全网信道协调切换
+uint8_t  twoPhaseState = 0;       // 0=IDLE, 1=WAITING_READY, 2=SENDING_COMMIT, 3=VERIFYING
+uint16_t pendingFreq = 530;
+uint8_t  pendingSf    = 7;
+uint16_t oldFreq = 530;
+uint8_t  oldSf    = 7;
+uint32_t twoPhaseTimer = 0;
+uint8_t  readyNodesMask = 0;      // bit0=0x21, bit1=0x22, bit2=0x30
+const uint8_t READY_MASK_ALL = 0x07;  // bit0|bit1|bit2 = 0x21,0x22,0x30
+const uint32_t PREPARE_TIMEOUT = 3000;
+const uint32_t VERIFY_TIMEOUT  = 5000;
 
 // ★ DATA 去重：同一 (srcId, pathId, data[off], data[off+1]) 2秒内不重复处理
 #define DATA_DEDUP_MS 2000
@@ -130,6 +145,7 @@ void setup() {
 
   Serial.print(F("Main 0x"));
   Serial.print(MY_NODE_ID, HEX);
+  oldFreq = 530; oldSf = 7;
   Serial.println(F(" OK  530MHz SF7"));
 }
 
@@ -173,18 +189,46 @@ void loop() {
         else { Serial.println(F("WL add failed")); }
       }
     }
+    else if (strncmp(buf, "CFG_ALL:", 8) == 0) {
+      // CFG_ALL:F530:S8  → 全网两阶段提交切换
+      if (twoPhaseState != 0) {
+        Serial.println(F("2PC busy"));
+        return;
+      }
+      char* p = buf + 8;
+      uint16_t freq = 530; uint8_t sf = 7;
+      while (*p) {
+        if      (*p == 'F' || *p == 'f') freq = (uint16_t)atoi(p + 1);
+        else if (*p == 'S' || *p == 's') sf   = (uint8_t)atoi(p + 1);
+        p++;
+      }
+      // 参数校验
+      if (freq < 137 || freq > 1020) {
+        Serial.print(F("CFG_ALL bad freq=")); Serial.println(freq, DEC);
+        return;
+      }
+      if (sf < 7 || sf > 12) {
+        Serial.print(F("CFG_ALL bad SF=")); Serial.println(sf, DEC);
+        return;
+      }
+      pendingFreq = freq; pendingSf = sf;
+      sendPrepare();
+    }
     else if (strncmp(buf, "CFG:", 4) == 0) {
-      // CFG:<dest>:F<freq>S<sf>P<power>  e.g. CFG:0x21:F530:S7:P17
+      // CFG:<dest>:P<power>  → 单节点功率调整（维持原有逻辑）
       char* p = buf + 4;
       uint8_t dest = (uint8_t)strtol(p, &p, 16);
-      uint16_t freq = 530; uint8_t sf = 7, power = 17;
+      uint16_t freq = 0; uint8_t sf = 0, power = 17;
       while (*p) {
         if      (*p == 'F' || *p == 'f') freq  = (uint16_t)atoi(p + 1);
         else if (*p == 'S' || *p == 's') sf    = (uint8_t)atoi(p + 1);
         else if (*p == 'P' || *p == 'p') power = (uint8_t)atoi(p + 1);
         p++;
       }
-      sendCMD(dest, freq, sf, power);
+      // 功率命令：只调功率 (freq==0 && sf==0 表示纯功率调整)
+      if (freq == 0 && sf == 0) {
+        sendCMD(dest, 0, 0, power);  // freq=0,sf=0: 仅调功率
+      }
     }
     else if (strncmp(buf, "KICK:", 5) == 0 || strncmp(buf, "K:", 2) == 0) {
       char* p = (buf[0] == 'K' && buf[1] == 'I') ? buf + 5 : buf + 2;
@@ -208,6 +252,49 @@ void loop() {
       LoRa.endPacket();
     }
     return;
+  }
+
+  // ★ 两阶段提交状态机
+  if (twoPhaseState == 1) {  // WAITING_READY
+    if (millis() - twoPhaseTimer > PREPARE_TIMEOUT) {
+      // 超时：部分节点未就绪，仍发 COMMIT
+      Serial.print(F("2PC timeout ready=0x"));
+      Serial.println(readyNodesMask, HEX);
+      twoPhaseState = 2;  // SENDING_COMMIT
+      twoPhaseTimer = millis();
+      sendCommit();
+    }
+  }
+  if (twoPhaseState == 3) {  // VERIFYING
+    if (millis() - twoPhaseTimer > VERIFY_TIMEOUT) {
+      // 验证超时，上报结果
+      Serial.print(F("2PC verify done ready=0x"));
+      Serial.print(readyNodesMask, HEX);
+      Serial.print(F(" online=0x"));
+      uint8_t onlineMask = 0;
+      for (uint8_t id = 0x21; id <= 0x30; id++) {
+        if (id == MY_NODE_ID) continue;
+        if (nodeOnline[id]) {
+          if (id == 0x21) onlineMask |= 0x01;
+          else if (id == 0x22) onlineMask |= 0x02;
+          else if (id == 0x30) onlineMask |= 0x04;
+        }
+      }
+      Serial.println(onlineMask, HEX);
+      // 发送结果帧给 PC
+      LoRaFrame result;
+      memset(&result, 0, FRAME_SIZE);
+      result.head[0] = FRAME_HEADER_0;
+      result.head[1] = FRAME_HEADER_1;
+      result.srcId   = MY_NODE_ID;
+      result.destId  = MY_NODE_ID;
+      result.msgType = MSG_CMD_COMMIT;  // 复用 COMMIT 类型表示切换结果
+      result.data[0] = 0x01;  // result flag
+      result.data[1] = readyNodesMask;
+      result.data[2] = onlineMask;
+      Serial.write((uint8_t*)&result, FRAME_SIZE);
+      twoPhaseState = 0;
+    }
   }
 
   static uint32_t lastCheck = 0;
@@ -286,8 +373,8 @@ void handlePacket() {
     return;
   }
 
-  // 3. 地址过滤
-  if (rx->destId != MY_NODE_ID) {
+  // 3. 地址过滤（允许广播地址通过，用于两阶段提交）
+  if (rx->destId != MY_NODE_ID && rx->destId != BROADCAST_ID) {
     stat_badDest++;
     // 只对非广播消息打印（减少噪声）
     // Serial.print(F("[NOT FOR ME] dst=0x"));
@@ -345,7 +432,10 @@ void handlePacket() {
 
   // ★ 将帧转发给 PC UI（ACK_CONFIRM 由 sendACK 转发，此处跳过避免重复）
   // ★ 清除踢出中继的数据，避免前端拓扑显示已被踢出的中继
-  if (rx->msgType != MSG_ACK_CONFIRM) {
+  if (rx->msgType != MSG_ACK_CONFIRM
+      && rx->msgType != MSG_CMD_PREPARE
+      && rx->msgType != MSG_CMD_COMMIT
+      && rx->msgType != MSG_CMD_READY) {
     uint8_t fwd[FRAME_SIZE];
     memcpy(fwd, raw, FRAME_SIZE);
     if (rx->count < 4) fwd[14] = (uint8_t)(int8_t)rssi;
@@ -370,11 +460,20 @@ void handlePacket() {
     }
     Serial.write(fwd, FRAME_SIZE);
   }
+  // PREPARE/COMMIT/READY 帧也转发给 PC（两阶段提交进度）
+  if (rx->msgType == MSG_CMD_PREPARE || rx->msgType == MSG_CMD_COMMIT || rx->msgType == MSG_CMD_READY) {
+    uint8_t fwd[FRAME_SIZE];
+    memcpy(fwd, raw, FRAME_SIZE);
+    fwd[14] = (uint8_t)(int8_t)rssi;
+    Serial.write(fwd, FRAME_SIZE);
+  }
 
   switch (rx->msgType) {
     case MSG_HB:        handleHeartbeat(rx, rssi);  break;  // heartbeat
     case MSG_JOIN_REQ:  handleJOIN(rx, rssi);   break;
     case MSG_CMD_ACK:   handleCMD_ACK(rx, rssi);  break;
+    case MSG_CMD_PREPARE: handlePrepare(rx, rssi); break;
+    case MSG_CMD_READY:   handleReady(rx, rssi);   break;
     case MSG_CMD:       handleCMD(rx, rssi);     break;
     case MSG_RREQ:  handleRREQ(rx);  break;
     case MSG_DATA:  handleDATA(rx);  break;
@@ -412,6 +511,18 @@ void handleCMD(LoRaFrame* rx, int8_t rssi) {
   uint16_t freq  = ((uint16_t)rx->data[3] << 8) | rx->data[4];
   uint8_t  sf    = rx->data[5];
   uint8_t  power = rx->data[6];
+
+  // 纯功率调整：freq=0, sf=0 表示仅调发射功率
+  if (freq == 0 && sf == 0) {
+    Serial.print(F("CMD self P")); Serial.print(power, DEC);
+    if (power < 2 || power > 20) { Serial.println(F(" bad power")); sendCmdAck(rx->srcId, 3); return; }
+    LoRa.setTxPower(power);
+    Serial.print(F(" r=")); Serial.print(rssi, DEC);
+    Serial.println(F(" OK"));
+    sendCmdAck(rx->srcId, 0);
+    return;
+  }
+
   Serial.print(F("CMD self F=")); Serial.print(freq, DEC);
   Serial.print(F(" SF")); Serial.print(sf, DEC);
   Serial.print(F(" P")); Serial.print(power, DEC);
@@ -452,6 +563,48 @@ void handleCMD_ACK(LoRaFrame* rx, int8_t rssi) {
   if (rx->srcId == cmdDestNode) { waitingCmdAck = false; }
   Serial.write((uint8_t*)rx, FRAME_SIZE);
 }
+
+void handleReady(LoRaFrame* rx, int8_t rssi) {
+  if (twoPhaseState != 1) return;  // 不在等待状态
+  uint8_t srcId = rx->srcId;
+  uint8_t status = rx->data[0];
+  Serial.print(F("READY from 0x"));
+  Serial.print(srcId, HEX);
+  Serial.print(F(" status="));
+  Serial.print(status, DEC);
+  Serial.print(F(" r="));
+  Serial.println(rssi, DEC);
+
+  if (status == 0x00) {
+    // 标记就绪
+    if (srcId == 0x21) readyNodesMask |= 0x01;
+    else if (srcId == 0x22) readyNodesMask |= 0x02;
+    else if (srcId == 0x30) readyNodesMask |= 0x04;
+
+
+    // 收齐所有已知在线节点 → 立即发 COMMIT
+    if ((readyNodesMask & READY_MASK_ALL) == READY_MASK_ALL) {
+      sendCommit();
+    }
+  } else {
+    // 节点报告参数不支持
+    Serial.print(F("READY FAIL from 0x"));
+    Serial.print(srcId, HEX);
+    Serial.print(F(" status="));
+    Serial.println(status, DEC);
+    twoPhaseState = 0;  // 放弃切换
+  }
+}
+
+void handlePrepare(LoRaFrame* rx, int8_t rssi) {
+  // mainTerm 收到自己发的 PREPARE（被 relay 转发回来了），忽略
+  if (rx->srcId == MY_NODE_ID) return;
+  // 其他节点不应发 PREPARE 给 mainTerm，忽略
+  Serial.print(F("PREPARE from 0x"));
+  Serial.print(rx->srcId, HEX);
+  Serial.println(F(" ignored"));
+}
+
 void handleRREQ(LoRaFrame* rx) {
   int rssi = LoRa.packetRssi();
 
@@ -691,6 +844,77 @@ void sendUnkick(uint8_t destId) {
   Serial.println(destId, HEX);
 }
 
+// ★ 两阶段提交 — Phase1: 发送 PREPARE
+void sendPrepare() {
+  twoPhaseState = 1;  // WAITING_READY
+  readyNodesMask = 0;
+  twoPhaseTimer = millis();
+  oldFreq = pendingFreq;  // 暂存（实际从当前 LoRa 频率获取）
+  oldSf   = pendingSf;
+
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = BROADCAST_ID;
+  frame.msgType = MSG_CMD_PREPARE;
+  frame.data[0] = (pendingFreq >> 8) & 0xFF;
+  frame.data[1] = pendingFreq & 0xFF;
+  frame.data[2] = pendingSf;
+  frame.data[3] = 2;  // TTL=2
+  calcChecksum(&frame);
+
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.write((uint8_t*)&frame, FRAME_SIZE);
+
+  Serial.print(F("PREPARE tx F="));
+  Serial.print(pendingFreq, DEC);
+  Serial.print(F(" SF"));
+  Serial.println(pendingSf, DEC);
+}
+
+// ★ 两阶段提交 — Phase2: 发送 COMMIT 并自切频道
+void sendCommit() {
+  LoRaFrame frame;
+  memset(&frame, 0, FRAME_SIZE);
+  frame.head[0] = FRAME_HEADER_0;
+  frame.head[1] = FRAME_HEADER_1;
+  frame.srcId   = MY_NODE_ID;
+  frame.destId  = BROADCAST_ID;
+  frame.msgType = MSG_CMD_COMMIT;
+  frame.data[0] = (pendingFreq >> 8) & 0xFF;
+  frame.data[1] = pendingFreq & 0xFF;
+  frame.data[2] = pendingSf;
+  frame.data[3] = 2;  // TTL=2
+  calcChecksum(&frame);
+
+  // 在旧频道上发送 COMMIT
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket();
+  Serial.write((uint8_t*)&frame, FRAME_SIZE);
+
+  // 短暂等待确保发送完成
+  delay(50);
+
+  // mainTerm 自己切换到新频道
+  LoRa.begin(pendingFreq * 1000000UL);
+  LoRa.setSpreadingFactor(pendingSf);
+  LoRa.setTxPower(17);
+  oldFreq = pendingFreq;
+  oldSf   = pendingSf;
+
+  Serial.print(F("COMMIT tx + self switch F="));
+  Serial.print(pendingFreq, DEC);
+  Serial.print(F(" SF"));
+  Serial.println(pendingSf, DEC);
+
+  twoPhaseState = 3;  // VERIFYING
+  twoPhaseTimer = millis();
+}
 // =============================================
 void handleJOIN(LoRaFrame* rx, int8_t rssi) {
   uint8_t srcId = rx->srcId;

@@ -146,25 +146,47 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 </div>
 
 <!-- ════════════ CHANNEL CONFIG PANEL ════════════ -->
-<div id="channel-panel" class="fixed right-0 top-0 h-full w-72 z-50 shadow-2xl" style="background:var(--card);border-left:1px solid var(--brd);transform:translateX(100%);transition:transform .3s ease;display:none;">
-  <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--brd);">
+<div id="channel-panel" class="fixed right-0 top-0 h-full w-80 z-50 shadow-2xl flex flex-col" style="background:var(--card);border-left:1px solid var(--brd);transform:translateX(100%);transition:transform .3s ease;display:none;">
+  <div class="flex items-center justify-between px-4 py-3 border-b flex-shrink-0" style="border-color:var(--brd);">
     <h3 class="font-bold" style="color:var(--cyan);">⚙️ 信道配置</h3>
     <button onclick="hideChannelPanel()" class="text-xl leading-none" style="color:var(--mut);">&times;</button>
   </div>
-  <div class="p-4 space-y-4">
-    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">目标节点</label>
-      <select id="cfg-node" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
-        <option value="0x10">主节点 mainTerm (0x10)</option><option value="0x21">中继 relay (0x21)</option>
-        <option value="0x22">中继 relay (0x22)</option><option value="0x30">终端 sender (0x30)</option></select></div>
-    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">频率 (MHz)</label>
-      <input id="cfg-freq" type="number" value="530" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"></div>
-    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">扩频因子 (SF)</label>
-      <select id="cfg-sf" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
-        <option value="7" selected>SF7</option><option value="8">SF8</option><option value="9">SF9</option><option value="10">SF10</option><option value="11">SF11</option><option value="12">SF12</option></select></div>
-    <div><label class="text-xs font-semibold block mb-1" style="color:var(--mut);">发射功率 (dBm)</label>
-      <input id="cfg-power" type="number" value="17" min="2" max="20" class="w-full rounded-md px-3 py-2 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"></div>
-    <button onclick="sendChannelConfig()" class="w-full py-2 rounded-md text-sm font-bold text-white btn-trans" style="background:var(--cyan);">📤 下发配置</button>
-    <p class="text-xs leading-relaxed" style="color:var(--mut);">通过 PC→主节点→LoRa→目标节点下发。当前为演示模式。</p>
+  <div class="flex-1 overflow-y-auto custom-scroll p-4 space-y-4">
+
+    <!-- 功率调整区 -->
+    <div class="rounded-lg p-3" style="background:var(--bg);border:1px solid var(--brd);">
+      <div class="text-xs font-bold mb-2" style="color:#f59e0b;">⚡ 功率调整（单节点即时生效）</div>
+      <div class="space-y-2">
+        <div><label class="text-[10px] font-semibold block mb-0.5" style="color:var(--mut);">目标节点</label>
+          <select id="cfg-node" class="w-full rounded-md px-2 py-1.5 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+            <option value="0x10">主节点 mainTerm (0x10)</option><option value="0x21">中继 relay (0x21)</option>
+            <option value="0x22">中继 relay (0x22)</option><option value="0x30">终端 sender (0x30)</option></select></div>
+        <div><label class="text-[10px] font-semibold block mb-0.5" style="color:var(--mut);">发射功率 (dBm)</label>
+          <input id="cfg-power" type="number" value="17" min="2" max="20" class="w-full rounded-md px-2 py-1.5 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"></div>
+        <button onclick="sendPowerConfig()" class="w-full py-1.5 rounded-md text-xs font-bold text-white btn-trans" style="background:#f59e0b;">📤 下发功率</button>
+      </div>
+    </div>
+
+    <!-- 频率/扩频因子调整区 -->
+    <div class="rounded-lg p-3" style="background:var(--bg);border:1px solid var(--cyan);">
+      <div class="text-xs font-bold mb-2" style="color:var(--cyan);">📡 频率 / 扩频因子（全网协调切换）</div>
+      <p class="text-[10px] mb-2 px-2 py-1 rounded" style="background:#ef444422;color:#ef4444;">⚠️ 这将使整个网络切换到新信道，通信将短暂中断</p>
+      <div class="space-y-2">
+        <div><label class="text-[10px] font-semibold block mb-0.5" style="color:var(--mut);">新频率 (MHz)</label>
+          <input id="cfg-freq-all" type="number" value="530" class="w-full rounded-md px-2 py-1.5 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"></div>
+        <div><label class="text-[10px] font-semibold block mb-0.5" style="color:var(--mut);">新扩频因子 (SF)</label>
+          <select id="cfg-sf-all" class="w-full rounded-md px-2 py-1.5 text-sm outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+            <option value="7" selected>SF7</option><option value="8">SF8</option><option value="9">SF9</option><option value="10">SF10</option><option value="11">SF11</option><option value="12">SF12</option></select></div>
+        <button id="btn-channel-switch" onclick="startChannelSwitch()" class="w-full py-1.5 rounded-md text-xs font-bold text-white btn-trans" style="background:var(--cyan);">🚀 启动全网切换</button>
+      </div>
+    </div>
+
+    <!-- 切换进度 -->
+    <div id="channel-progress" class="rounded-lg p-3 hidden" style="background:var(--bg);border:1px solid var(--brd);">
+      <div class="text-xs font-bold mb-2" style="color:var(--mut);">🔄 切换进度</div>
+      <div id="channel-progress-steps" class="space-y-2 text-xs"></div>
+    </div>
+
   </div>
 </div>
 
@@ -872,15 +894,36 @@ function setLogFilter(f,btn){
 }
 
 // ════════════════════ 信道面板 ════════════════════
-function showChannelPanel(){const p=document.getElementById('channel-panel');p.style.display='block';requestAnimationFrame(()=>{p.style.transform='translateX(0)';});}
+function showChannelPanel(){const p=document.getElementById('channel-panel');p.style.display='flex';requestAnimationFrame(()=>{p.style.transform='translateX(0)';});}
 function hideChannelPanel(){const p=document.getElementById('channel-panel');p.style.transform='translateX(100%)';setTimeout(()=>{p.style.display='none';},300);}
-function sendChannelConfig(){
-  const node=document.getElementById('cfg-node').value,freq=document.getElementById('cfg-freq').value;
-  const sf=document.getElementById('cfg-sf').value,power=document.getElementById('cfg-power').value;
-  const cmd=`CFG:${node}:F${freq}:S${sf}:P${power}`;
+
+function sendPowerConfig(){
+  const node=document.getElementById('cfg-node').value;
+  const power=document.getElementById('cfg-power').value;
+  const cmd=`CFG:${node}:P${power}`;
   if(globalWs&&globalWs.readyState===1)globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
-  addLog('SYS','配置',`下发至${node}: ${freq}MHz SF${sf} ${power}dBm`,'#a78bfa');
-  hideChannelPanel();
+  addLog('SYS','功率',`下发至${node}: ${power}dBm`,'#f59e0b');
+}
+
+function startChannelSwitch(){
+  const freq=document.getElementById('cfg-freq-all').value;
+  const sf=document.getElementById('cfg-sf-all').value;
+  if(!freq||freq<137||freq>1020){alert('频率范围: 137-1020 MHz');return;}
+  const cmd=`CFG_ALL:F${freq}:S${sf}`;
+  if(!globalWs||globalWs.readyState!==1){addLog('SYS','信道','❌ WebSocket 未连接','#ef4444');return;}
+  globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
+  addLog('SYS','信道',`发起全网切换: ${freq}MHz SF${sf}`,'#22d3ee');
+
+  const prog=document.getElementById('channel-progress');
+  prog.classList.remove('hidden');
+  document.getElementById('channel-progress-steps').innerHTML=`
+    <div class="flex items-center gap-2" id="step-prepare"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:var(--cyan);color:#fff;">●</span><span>PREPARE — 广播切换参数...</span></div>
+    <div class="flex items-center gap-2" id="step-commit" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>COMMIT — 等待节点就绪...</span></div>
+    <div class="flex items-center gap-2" id="step-verify" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>VERIFY — 验证新频道...</span></div>
+    <div id="ready-nodes" class="text-[10px] pl-7" style="color:var(--mut);"></div>
+  `;
+  document.getElementById('btn-channel-switch').disabled=true;
+  document.getElementById('btn-channel-switch').style.opacity='0.5';
 }
 
 // ════════════════════ 白名单面板 ════════════════════
@@ -1208,6 +1251,56 @@ function connectWS(){
     }
     if(d.type==='cmd_ack'){
       addLog('SYS','CMD_ACK',`0x${d.node.toString(16).toUpperCase()} 配置${d.status===0?'成功':'失败'} (status=${d.status})`,d.status===0?'#22c55e':'#ef4444');
+      return;
+    }
+    // ★ 两阶段提交进度
+    if(d.type==='two_phase_progress'){
+      const steps=document.getElementById('channel-progress-steps');
+      if(!steps)return;
+      if(d.phase==='prepare'){
+        addLog('SYS','2PC',d.msg,'#22d3ee');
+      }else if(d.phase==='ready'){
+        const readyDiv=document.getElementById('ready-nodes');
+        if(readyDiv){
+          readyDiv.innerHTML+=(d.status===0
+            ?`<span style="color:#22c55e;">✅ ${d.nodeHex} 已就绪</span> `
+            :`<span style="color:#ef4444;">❌ ${d.nodeHex} 参数不支持</span> `);
+        }
+        addLog('SYS','2PC',d.msg,d.status===0?'#22c55e':'#ef4444');
+      }else if(d.phase==='commit'){
+        const commitStep=document.getElementById('step-commit');
+        if(commitStep){
+          commitStep.style.opacity='1';
+          commitStep.querySelector('span:first-child').style.background='var(--cyan)';
+          commitStep.querySelector('span:first-child').style.color='#fff';
+          commitStep.querySelector('span:first-child').style.borderColor='var(--cyan)';
+          commitStep.querySelector('span:first-child').textContent='●';
+        }
+        addLog('SYS','2PC',d.msg,'#22d3ee');
+      }
+      return;
+    }
+    if(d.type==='channel_switch_result'){
+      const verifyStep=document.getElementById('step-verify');
+      if(verifyStep){
+        verifyStep.style.opacity='1';
+        if(d.onlineCount===d.totalNodes){
+          verifyStep.querySelector('span:first-child').style.background='#22c55e';
+          verifyStep.querySelector('span:first-child').style.color='#fff';
+          verifyStep.querySelector('span:first-child').style.borderColor='#22c55e';
+          verifyStep.querySelector('span:first-child').textContent='✓';
+          document.getElementById('ready-nodes').innerHTML+=`<br/><span style="color:#22c55e;">✅ 全部 ${d.onlineCount}/${d.totalNodes} 节点在线</span>`;
+        }else{
+          verifyStep.querySelector('span:first-child').style.background='#f59e0b';
+          verifyStep.querySelector('span:first-child').style.color='#fff';
+          verifyStep.querySelector('span:first-child').style.borderColor='#f59e0b';
+          verifyStep.querySelector('span:first-child').textContent='⚠';
+          document.getElementById('ready-nodes').innerHTML+=`<br/><span style="color:#f59e0b;">⚠ ${d.onlineCount}/${d.totalNodes} 节点在线</span>`;
+        }
+      }
+      addLog('SYS','2PC',d.msg,d.onlineCount===d.totalNodes?'#22c55e':'#f59e0b');
+      const btn=document.getElementById('btn-channel-switch');
+      if(btn){btn.disabled=false;btn.style.opacity='1';}
       return;
     }
         if(d.data && d.data.hbOnline){

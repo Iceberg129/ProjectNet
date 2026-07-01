@@ -25,6 +25,12 @@ const uint8_t MSG_KICK     = 0x08;   // 踢出命令
 const uint8_t MSG_UNKICK   = 0x09;   // 恢复命令
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t FRAME_SIZE     = 16;
+const uint8_t MSG_KICK      = 0x08;
+const uint8_t MSG_UNKICK    = 0x09;
+const uint8_t MSG_CMD_PREPARE = 0x0A;
+const uint8_t MSG_CMD_READY   = 0x0B;
+const uint8_t MSG_CMD_COMMIT  = 0x0C;
+const uint8_t BROADCAST_ID    = 0xFF;
 
 #pragma pack(push, 1)
 typedef struct {
@@ -76,6 +82,12 @@ uint32_t joinSendTime = 0;
 uint32_t lastHbTime    = 0;
 uint16_t hbInterval    = 10000;
 
+// ★ 两阶段提交 — 暂存待切换参数
+bool     pendingReady = false;
+uint16_t pendingFreq  = 530;
+uint8_t  pendingSf    = 7;
+bool     pauseAODV    = false;  // 切换期间暂停正常通信
+
 // =============================================
 void setup() {
   // LoRa.setPins(A3);
@@ -100,7 +112,7 @@ void setup() {
 void loop() {
   checkForPacket();  // ★ 即使 KICKED 也继续监听，等待 UNKICK 恢复
   if (discState == KICKED) { return; }  // 静默：不收发业务帧
-  // Heartbeat: 10s +/- 2s jitter
+  if (pauseAODV) return;  // 两阶段提交进行中，暂停正常通信
   // Heartbeat: 10s +/- 2s jitter
   if (millis() - lastHbTime >= hbInterval) {
     sendHeartbeat();
@@ -195,6 +207,21 @@ void handleCMD(LoRaFrame* rx) {
   uint8_t  sf    = rx->data[5];
   uint8_t  power = rx->data[6];
   int rssi = LoRa.packetRssi();
+
+  // 纯功率调整：freq=0, sf=0 表示仅调发射功率，不碰频率/SF
+  if (freq == 0 && sf == 0) {
+    uint8_t st = (power < 2 || power > 20) ? 3 : 0;
+    if (st == 0) LoRa.setTxPower(power);
+    Serial.print(F("CMD P")); Serial.print(power, DEC);
+    Serial.print(F(" r=")); Serial.print(rssi, DEC);
+    Serial.println(st == 0 ? F(" OK") : F(" bad power"));
+    LoRaFrame ack; memset(&ack, 0, FRAME_SIZE);
+    ack.head[0]=FRAME_HEADER_0; ack.head[1]=FRAME_HEADER_1;
+    ack.srcId=MY_NODE_ID; ack.destId=rx->srcId; ack.msgType=MSG_CMD_ACK; ack.data[0]=st;
+    calcChecksum(&ack); LoRa.beginPacket(); LoRa.write((uint8_t*)&ack, FRAME_SIZE); LoRa.endPacket();
+    return;
+  }
+
   Serial.print(F("CMD F=")); Serial.print(freq, DEC);
   Serial.print(F(" SF")); Serial.print(sf, DEC);
   Serial.print(F(" P")); Serial.print(power, DEC);
@@ -219,6 +246,66 @@ void handleCMD(LoRaFrame* rx) {
   LoRa.write((uint8_t*)&ack, FRAME_SIZE);
   LoRa.endPacket();
   Serial.print(F("CMD_ACK tx status=")); Serial.println(status, DEC);
+}
+
+void handleTwoPhase(LoRaFrame* rx) {
+  uint8_t  msgType = rx->msgType;
+  uint16_t freq = ((uint16_t)rx->data[0] << 8) | rx->data[1];
+  uint8_t  sf   = rx->data[2];
+  int rssi = LoRa.packetRssi();
+
+  if (msgType == MSG_CMD_PREPARE) {
+    Serial.print(F("PREPARE F=")); Serial.print(freq, DEC);
+    Serial.print(F(" SF")); Serial.print(sf, DEC);
+    Serial.print(F(" r=")); Serial.println(rssi, DEC);
+
+    uint8_t status = 0;
+    if (freq < 137 || freq > 1020) status = 1;
+    else if (sf < 7 || sf > 12)    status = 2;
+
+    if (status == 0) {
+      pendingFreq  = freq;
+      pendingSf    = sf;
+      pendingReady = true;
+      pauseAODV    = true;  // 暂停通信周期
+    }
+
+    // 回复 READY
+    LoRaFrame ack;
+    memset(&ack, 0, FRAME_SIZE);
+    ack.head[0] = FRAME_HEADER_0;
+    ack.head[1] = FRAME_HEADER_1;
+    ack.srcId   = MY_NODE_ID;
+    ack.destId  = 0x10;
+    ack.msgType = MSG_CMD_READY;
+    ack.data[0] = status;
+    calcChecksum(&ack);
+    LoRa.beginPacket();
+    LoRa.write((uint8_t*)&ack, FRAME_SIZE);
+    LoRa.endPacket();
+    Serial.print(F("READY tx status="));
+    Serial.println(status, DEC);
+  }
+  else if (msgType == MSG_CMD_COMMIT) {
+    Serial.print(F("COMMIT F=")); Serial.print(freq, DEC);
+    Serial.print(F(" SF")); Serial.print(sf, DEC);
+    Serial.print(F(" r=")); Serial.println(rssi, DEC);
+
+    if (pendingReady) {
+      LoRa.begin(freq * 1000000UL);
+      LoRa.setSpreadingFactor(sf);
+      LoRa.setTxPower(17);
+      pendingReady = false;
+      pauseAODV    = false;
+      // 重置路由（新频道需要重新发现）
+      route.valid = false;
+      discState   = IDLE;
+      lastAction  = millis();
+      Serial.println(F("COMMIT applied — route reset"));
+    } else {
+      Serial.println(F("COMMIT ignored (no PREPARE)"));
+    }
+  }
 }
 
 void sendHeartbeat() {
@@ -300,7 +387,7 @@ void checkForPacket() {
   if (frame.head[0] != FRAME_HEADER_0 || frame.head[1] != FRAME_HEADER_1) {
     return;
   }
-  if (frame.destId != MY_NODE_ID) {
+  if (frame.destId != MY_NODE_ID && frame.destId != BROADCAST_ID) {
     return;
   }
   if (discState == JOINING) {
@@ -337,7 +424,15 @@ void checkForPacket() {
     handleCMD(&frame);
     return;
   }
-  if (frame.msgType != MSG_RREP && frame.msgType != MSG_ACK && frame.msgType != MSG_CMD) {
+  if (frame.msgType == MSG_CMD_PREPARE) {
+    handleTwoPhase(&frame);
+    return;
+  }
+  if (frame.msgType == MSG_CMD_COMMIT) {
+    handleTwoPhase(&frame);
+    return;
+  }
+  if (frame.msgType != MSG_RREP && frame.msgType != MSG_ACK && frame.msgType != MSG_CMD && frame.msgType != MSG_CMD_PREPARE && frame.msgType != MSG_CMD_COMMIT) {
     return;  // 只关心 RREP 和 ACK
   }
   if (!verifyChecksum(&frame)) {
