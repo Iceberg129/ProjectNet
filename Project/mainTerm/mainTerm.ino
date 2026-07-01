@@ -373,8 +373,8 @@ void handlePacket() {
     return;
   }
 
-  // 3. 地址过滤
-  if (rx->destId != MY_NODE_ID) {
+  // 3. 地址过滤（允许广播地址通过，用于两阶段提交）
+  if (rx->destId != MY_NODE_ID && rx->destId != BROADCAST_ID) {
     stat_badDest++;
     // 只对非广播消息打印（减少噪声）
     // Serial.print(F("[NOT FOR ME] dst=0x"));
@@ -457,11 +457,20 @@ void handlePacket() {
     }
     Serial.write(fwd, FRAME_SIZE);
   }
+  // PREPARE/COMMIT/READY 帧也转发给 PC（两阶段提交进度）
+  if (rx->msgType == MSG_CMD_PREPARE || rx->msgType == MSG_CMD_COMMIT || rx->msgType == MSG_CMD_READY) {
+    uint8_t fwd[FRAME_SIZE];
+    memcpy(fwd, raw, FRAME_SIZE);
+    fwd[14] = (uint8_t)(int8_t)rssi;
+    Serial.write(fwd, FRAME_SIZE);
+  }
 
   switch (rx->msgType) {
     case MSG_HB:        handleHeartbeat(rx, rssi);  break;  // heartbeat
     case MSG_JOIN_REQ:  handleJOIN(rx, rssi);   break;
     case MSG_CMD_ACK:   handleCMD_ACK(rx, rssi);  break;
+    case MSG_CMD_PREPARE: handlePrepare(rx, rssi); break;
+    case MSG_CMD_READY:   handleReady(rx, rssi);   break;
     case MSG_CMD:       handleCMD(rx, rssi);     break;
     case MSG_RREQ:  handleRREQ(rx);  break;
     case MSG_DATA:  handleDATA(rx);  break;
@@ -539,6 +548,50 @@ void handleCMD_ACK(LoRaFrame* rx, int8_t rssi) {
   if (rx->srcId == cmdDestNode) { waitingCmdAck = false; }
   Serial.write((uint8_t*)rx, FRAME_SIZE);
 }
+
+void handleReady(LoRaFrame* rx, int8_t rssi) {
+  if (twoPhaseState != 1) return;  // 不在等待状态
+  uint8_t srcId = rx->srcId;
+  uint8_t status = rx->data[0];
+  Serial.print(F("READY from 0x"));
+  Serial.print(srcId, HEX);
+  Serial.print(F(" status="));
+  Serial.print(status, DEC);
+  Serial.print(F(" r="));
+  Serial.println(rssi, DEC);
+
+  if (status == 0x00) {
+    // 标记就绪
+    if (srcId == 0x21) readyNodesMask |= 0x01;
+    else if (srcId == 0x22) readyNodesMask |= 0x02;
+    else if (srcId == 0x30) readyNodesMask |= 0x04;
+
+    // 转发 READY 帧给 PC（UI 显示进度）
+    Serial.write((uint8_t*)rx, FRAME_SIZE);
+
+    // 收齐所有已知在线节点 → 立即发 COMMIT
+    if ((readyNodesMask & READY_MASK_ALL) == READY_MASK_ALL) {
+      sendCommit();
+    }
+  } else {
+    // 节点报告参数不支持
+    Serial.print(F("READY FAIL from 0x"));
+    Serial.print(srcId, HEX);
+    Serial.print(F(" status="));
+    Serial.println(status, DEC);
+    twoPhaseState = 0;  // 放弃切换
+  }
+}
+
+void handlePrepare(LoRaFrame* rx, int8_t rssi) {
+  // mainTerm 收到自己发的 PREPARE（被 relay 转发回来了），忽略
+  if (rx->srcId == MY_NODE_ID) return;
+  // 其他节点不应发 PREPARE 给 mainTerm，忽略
+  Serial.print(F("PREPARE from 0x"));
+  Serial.print(rx->srcId, HEX);
+  Serial.println(F(" ignored"));
+}
+
 void handleRREQ(LoRaFrame* rx) {
   int rssi = LoRa.packetRssi();
 
