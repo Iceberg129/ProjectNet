@@ -198,6 +198,21 @@ void handleCMD(LoRaFrame* rx) {
   uint8_t  sf    = rx->data[5];
   uint8_t  power = rx->data[6];
   int rssi = LoRa.packetRssi();
+
+  // 纯功率调整：freq=0, sf=0 表示仅调发射功率，不碰频率/SF
+  if (freq == 0 && sf == 0) {
+    uint8_t st = (power < 2 || power > 20) ? 3 : 0;
+    if (st == 0) LoRa.setTxPower(power);
+    Serial.print(F("CMD P")); Serial.print(power, DEC);
+    Serial.print(F(" r=")); Serial.print(rssi, DEC);
+    Serial.println(st == 0 ? F(" OK") : F(" bad power"));
+    LoRaFrame ack; memset(&ack, 0, FRAME_SIZE);
+    ack.head[0]=FRAME_HEADER_0; ack.head[1]=FRAME_HEADER_1;
+    ack.srcId=MY_NODE_ID; ack.destId=rx->srcId; ack.msgType=MSG_CMD_ACK; ack.data[0]=st;
+    calcChecksum(&ack); LoRa.beginPacket(); LoRa.write((uint8_t*)&ack, FRAME_SIZE); LoRa.endPacket();
+    return;
+  }
+
   Serial.print(F("CMD F=")); Serial.print(freq, DEC);
   Serial.print(F(" SF")); Serial.print(sf, DEC);
   Serial.print(F(" P")); Serial.print(power, DEC);
