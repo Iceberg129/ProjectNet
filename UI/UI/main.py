@@ -14,18 +14,22 @@ MSG_ACK_CONFIRM = 0x06
 MSG_KICK = 0x08; MSG_UNKICK = 0x09
 MSG_JOIN_REQ = 0x20; MSG_JOIN_ACK = 0x21; MSG_JOIN_REJ = 0x22
 MSG_CMD_PREPARE = 0x0A; MSG_CMD_READY = 0x0B; MSG_CMD_COMMIT = 0x0C
+MSG_NODE_STATUS = 0x07  # 节点状态上报
+BROADCAST_ID    = 0xFF  # 全网广播地址，不应出现在拓扑中
 MSG_NAMES = {MSG_RREQ:"RREQ",MSG_RREP:"RREP",MSG_DATA:"DATA",MSG_ACK:"ACK",
              MSG_HEARTBEAT:"HB",MSG_CMD:"CMD",MSG_CMD_ACK:"CMD_ACK",
              MSG_KICK:"KICK",MSG_UNKICK:"UNKICK",
              MSG_JOIN_REQ:"JOIN",MSG_JOIN_ACK:"JOIN_OK",MSG_JOIN_REJ:"JOIN_NO",
              MSG_ACK_CONFIRM:"ACK_CFM",
-             MSG_CMD_PREPARE:"PREPARE",MSG_CMD_READY:"READY",MSG_CMD_COMMIT:"COMMIT"}
+             MSG_CMD_PREPARE:"PREPARE",MSG_CMD_READY:"READY",MSG_CMD_COMMIT:"COMMIT",
+             MSG_NODE_STATUS:"STATUS"}
 MSG_ZH    = {MSG_RREQ:"路由发现",MSG_RREP:"路由应答",MSG_DATA:"数据传输",MSG_ACK:"确认应答",
              MSG_HEARTBEAT:"心跳",MSG_CMD:"下行命令",MSG_CMD_ACK:"命令应答",
              MSG_KICK:"踢出命令",MSG_UNKICK:"恢复命令",
              MSG_JOIN_REQ:"入网请求",MSG_JOIN_ACK:"入网允许",MSG_JOIN_REJ:"入网拒绝",
              MSG_ACK_CONFIRM:"ACK确认回执",
-             MSG_CMD_PREPARE:"信道准备",MSG_CMD_READY:"信道就绪",MSG_CMD_COMMIT:"信道切换"}
+             MSG_CMD_PREPARE:"信道准备",MSG_CMD_READY:"信道就绪",MSG_CMD_COMMIT:"信道切换",
+             MSG_NODE_STATUS:"节点状态"}
 
 NODE_ROLES = {
     0x10: {"role":"主节点","en":"mainTerm","color":"#f97316","size":60},
@@ -105,6 +109,7 @@ class StatsTracker:
         elif msg_type == MSG_JOIN_REJ:  pass  # 入网拒绝不计数
         elif msg_type == MSG_HEARTBEAT:  self._handle_heartbeat(src, dest, count); pass
         elif msg_type in (MSG_CMD_PREPARE, MSG_CMD_READY, MSG_CMD_COMMIT): pass
+        elif msg_type == MSG_NODE_STATUS:  pass  # 节点状态上报，单独处理
         else:                           self.bad  += 1
 
         # 链路 RSSI（从印章逐跳解析）
@@ -350,6 +355,14 @@ class StatsTracker:
 
 stats = StatsTracker()
 
+# ★ 两阶段提交去重：PREPARE/COMMIT 重试会产生大量重复事件
+_two_phase_seen_ready = set()   # 本轮已上报 READY 的节点
+_two_phase_commit_sent = False  # 本轮是否已发 COMMIT 进度
+_two_phase_prepare_sent = False # 本轮是否已发 PREPARE 进度
+
+# ★ 节点状态缓存：各节点最新上报的运行时状态
+_node_status_cache = {}  # {nodeId: {uptime, freeRAM, txPkts, rxPkts, freq, sf, updated}}
+
 # ════════════════════ WebSocket 连接管理 ════════════════════
 class ConnectionManager:
     def __init__(self):
@@ -483,6 +496,35 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                         "nodeHex":f"0x{uid:02X}"
                                     })), loop)
                                 except: pass
+                            # ★ mainTerm 自身状态上报: NODE_STATUS:uptime:freeRAM:txPkts:rxPkts:freq:sf
+                            elif line.startswith("NODE_STATUS:"):
+                                try:
+                                    parts = line[12:].split(":")
+                                    if len(parts) >= 6:
+                                        nid = 0x10
+                                        uptime = int(parts[0])
+                                        free_ram = int(parts[1])
+                                        tx_pkts = int(parts[2])
+                                        rx_pkts = int(parts[3])
+                                        freq = int(parts[4])
+                                        sf = int(parts[5])
+                                        _node_status_cache[nid] = {
+                                            "uptime": uptime, "freeRAM": free_ram,
+                                            "txPkts": tx_pkts, "rxPkts": rx_pkts,
+                                            "freq": freq, "sf": sf, "updated": time.time()
+                                        }
+                                        asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                            "type": "node_status",
+                                            "nodeId": nid,
+                                            "nodeHex": f"0x{nid:02X}",
+                                            "uptime": uptime,
+                                            "freeRAM": free_ram,
+                                            "txPkts": tx_pkts,
+                                            "rxPkts": rx_pkts,
+                                            "freq": freq,
+                                            "sf": sf,
+                                        })), loop)
+                                except: pass
                             elif line and _is_useful_log(line):
                                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
                                     "type":"text_log","text":line,"time":time.time()
@@ -500,6 +542,36 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                 struct.unpack(FRAME_FORMAT, frame_data)
                             stamps, relays = [], []
                             last_hop = None
+                            # ★ 处理两阶段提交进度事件（即使 dest 为广播地址也需推送）
+                            skip_normal = (dest == BROADCAST_ID or src == BROADCAST_ID)
+                            if skip_normal:
+                                if msg_type == MSG_CMD_PREPARE:
+                                    if not _two_phase_prepare_sent:
+                                        _two_phase_prepare_sent = True
+                                        _two_phase_seen_ready.clear()
+                                        _two_phase_commit_sent = False
+                                        freq = (data_bytes[0] << 8) | data_bytes[1]
+                                        sf = data_bytes[2]
+                                        asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                            "type": "two_phase_progress",
+                                            "phase": "prepare",
+                                            "freq": freq,
+                                            "sf": sf,
+                                            "msg": f"主节点发起全网信道切换: {freq}MHz SF{sf}"
+                                        })), loop)
+                                elif msg_type == MSG_CMD_COMMIT and not _two_phase_commit_sent:
+                                    _two_phase_commit_sent = True
+                                    freq = (data_bytes[0] << 8) | data_bytes[1]
+                                    sf = data_bytes[2]
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "two_phase_progress",
+                                        "phase": "commit",
+                                        "freq": freq,
+                                        "sf": sf,
+                                        "msg": "正在执行全网信道切换..."
+                                    })), loop)
+                                del buffer[:FRAME_SIZE]
+                                continue
                             if msg_type == MSG_RREQ:
                                 for i in range(min(count, 4)):
                                     rid, r = data_bytes[i*2], to_int8(data_bytes[i*2+1])
@@ -527,29 +599,38 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                             }
                             if last_hop is not None:
                                 frame_msg["lastHopRssi"] = last_hop
-                            asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(frame_msg)), loop)
+                            # ★ 切换结果帧不广播原始帧（已有 channel_switch_result 专用事件）
+                            is_commit_result = (msg_type == MSG_CMD_COMMIT and data_bytes[0] == 0x01)
+                            if not is_commit_result:
+                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(frame_msg)), loop)
                             # === Two-phase commit and channel switch handling ===
                             if msg_type == MSG_CMD_READY:
-                                # READY: data[0]=status
-                                status = data_bytes[0]
-                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
-                                    "type": "two_phase_progress",
-                                    "phase": "ready",
-                                    "nodeId": src,
-                                    "nodeHex": f"0x{src:02X}",
-                                    "status": status,
-                                    "msg": f"节点 0x{src:02X} {'已就绪' if status==0 else '参数不支持'}"
-                                })), loop)
+                                # READY: data[0]=status  ★ PREPARE 重试导致重复，去重
+                                if src not in _two_phase_seen_ready:
+                                    _two_phase_seen_ready.add(src)
+                                    status = data_bytes[0]
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "two_phase_progress",
+                                        "phase": "ready",
+                                        "nodeId": src,
+                                        "nodeHex": f"0x{src:02X}",
+                                        "status": status,
+                                        "msg": f"节点 0x{src:02X} {'已就绪' if status==0 else '参数不支持'}"
+                                    })), loop)
                             elif msg_type == MSG_CMD_PREPARE:
-                                freq = (data_bytes[0] << 8) | data_bytes[1]
-                                sf = data_bytes[2]
-                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
-                                    "type": "two_phase_progress",
-                                    "phase": "prepare",
-                                    "freq": freq,
-                                    "sf": sf,
-                                    "msg": f"主节点发起全网信道切换: {freq}MHz SF{sf}"
-                                })), loop)
+                                if not _two_phase_prepare_sent:
+                                    _two_phase_prepare_sent = True
+                                    _two_phase_seen_ready.clear()
+                                    _two_phase_commit_sent = False
+                                    freq = (data_bytes[0] << 8) | data_bytes[1]
+                                    sf = data_bytes[2]
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "two_phase_progress",
+                                        "phase": "prepare",
+                                        "freq": freq,
+                                        "sf": sf,
+                                        "msg": f"主节点发起全网信道切换: {freq}MHz SF{sf}"
+                                    })), loop)
                             elif msg_type == MSG_CMD_COMMIT:
                                 if data_bytes[0] == 0x01:
                                     # 切换结果帧
@@ -557,16 +638,25 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                     onlineMask = data_bytes[2]
                                     total = 3
                                     onlineCount = bin(onlineMask).count("1")
+                                    # ★ 逐节点在线状态
+                                    nodes_status = {
+                                        "0x21": {"ready": bool(readyMask & 0x01), "online": bool(onlineMask & 0x01)},
+                                        "0x22": {"ready": bool(readyMask & 0x02), "online": bool(onlineMask & 0x02)},
+                                        "0x30": {"ready": bool(readyMask & 0x04), "online": bool(onlineMask & 0x04)},
+                                    }
                                     asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
                                         "type": "channel_switch_result",
-                                        "success": True,
+                                        "success": onlineCount == total,
                                         "onlineCount": onlineCount,
                                         "totalNodes": total,
                                         "readyMask": readyMask,
                                         "onlineMask": onlineMask,
+                                        "nodes": nodes_status,
                                         "msg": f"切换完成: {onlineCount}/{total} 节点在线"
                                     })), loop)
-                                else:
+                                    _two_phase_prepare_sent = False  # ★ 本轮结束，允许下一轮 PREPARE
+                                elif not _two_phase_commit_sent:
+                                    _two_phase_commit_sent = True
                                     freq = (data_bytes[0] << 8) | data_bytes[1]
                                     sf = data_bytes[2]
                                     asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
@@ -576,6 +666,26 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                         "sf": sf,
                                         "msg": "正在执行全网信道切换..."
                                     })), loop)
+                            # ★ 节点状态上报帧（relayTerm/sender → LoRa → mainTerm → Serial）
+                            if msg_type == MSG_NODE_STATUS:
+                                uptime = (data_bytes[0] << 8) | data_bytes[1]
+                                free_ram = (data_bytes[2] << 8) | data_bytes[3]
+                                tx_pkts = (data_bytes[4] << 8) | data_bytes[5]
+                                rx_pkts = (data_bytes[6] << 8) | data_bytes[7]
+                                _node_status_cache[src] = {
+                                    "uptime": uptime, "freeRAM": free_ram,
+                                    "txPkts": tx_pkts, "rxPkts": rx_pkts,
+                                    "updated": time.time()
+                                }
+                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                    "type": "node_status",
+                                    "nodeId": src,
+                                    "nodeHex": f"0x{src:02X}",
+                                    "uptime": uptime,
+                                    "freeRAM": free_ram,
+                                    "txPkts": tx_pkts,
+                                    "rxPkts": rx_pkts,
+                                })), loop)
                             del buffer[:FRAME_SIZE]
                         except Exception:
                             del buffer[0:1]
@@ -620,203 +730,6 @@ async def ws_endpoint(websocket: WebSocket):
                         "type":"sys_error","msg":"❌ 串口未打开，无法发送命令。请先点击「🔌 打开串口」"}))
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-# ════════════════════ 模拟测试（增强版：RSSI 随时间变化） ════════════════════
-simulate_stop_event = asyncio.Event()     # 取消信号
-simulate_lock = asyncio.Lock()            # 防止并发模拟
-
-async def _check_cancel():
-    """检查是否被取消，若取消则抛出异常中断模拟"""
-    if simulate_stop_event.is_set():
-        raise asyncio.CancelledError("模拟已取消")
-
-@app.get("/api/stop_simulate")
-async def stop_simulate():
-    """停止正在运行的模拟"""
-    simulate_stop_event.set()
-    return {"status":"ok","msg":"已发送停止信号"}
-
-@app.get("/api/simulate")
-async def simulate_traffic():
-    # 防止并发模拟
-    if simulate_lock.locked():
-        return {"status":"busy","msg":"模拟正在运行中，请先停止"}
-    async with simulate_lock:
-        simulate_stop_event.clear()  # 重置取消信号
-        loop = asyncio.get_running_loop()
-
-        def bcast(obj):
-            obj.setdefault("stats", stats.to_dict())
-            asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(obj)), loop)
-
-        def rec(src, dest, mtype, pid, cnt, stamps, relays):
-            stats.record_frame(src, dest, mtype, pid, cnt, stamps, relays)
-            # ★ 广播由 record_frame 产生的待处理事件（如离线检测）
-            for evt in stats.get_pending_events():
-                bcast(evt)
-
-        def stamps_hex(stamps):
-            h = ""
-            for s in stamps:
-                h += f"{int(s['id'],16):02X}{u8h(s['rssi'])}"
-            return h.ljust(16, '0')
-
-        try:
-            # ── 第一阶段：节点入网 ──
-            for node_id, role, role_name in [(0x21,1,"relay21"),(0x22,1,"relay22"),(0x30,2,"sender")]:
-                await _check_cancel()
-                rec(node_id, 0x10, MSG_JOIN_REQ, 0, 0, [], [])
-                bcast({"type":"frame","src":node_id,"dest":0x10,"msgType":MSG_JOIN_REQ,"msgTypeName":"JOIN",
-                       "pathId":0,"count":0,"rssiStamps":[],"relays":[],
-                       "dataHex":f"0{role}00000000000000","checksum":0})
-                await asyncio.sleep(0.08)
-                await _check_cancel()
-                rec(0x10, node_id, MSG_JOIN_ACK, 0, 0, [], [])
-                bcast({"type":"frame","src":0x10,"dest":node_id,"msgType":MSG_JOIN_ACK,"msgTypeName":"JOIN_OK",
-                       "pathId":0,"count":0,"rssiStamps":[],"relays":[],
-                       "dataHex":"AC00000000000000","checksum":0})
-                await asyncio.sleep(0.08)
-                await _check_cancel()
-                # 心跳
-                rec(node_id, 0x10, MSG_HEARTBEAT, 0, 0, [], [])
-                bcast({"type":"frame","src":node_id,"dest":0x10,"msgType":MSG_HEARTBEAT,"msgTypeName":"HB",
-                       "pathId":0,"count":0,"rssiStamps":[],"relays":[],
-                       "dataHex":f"0{role}00000000000000","checksum":0})
-                await asyncio.sleep(0.05)
-            await asyncio.sleep(0.3)
-
-            # 模拟 RSSI 随时间缓慢变化
-            base_rssi = {"0x21": -48, "0x22": -55}
-            rssi_drift = {"0x21": 0, "0x22": 0}
-
-            def vary(relay: str) -> int:
-                """让 RSSI 在 ±8 dB 内缓慢漂移"""
-                import random
-                rssi_drift[relay] += random.choice([-2,-1,0,1,2])
-                rssi_drift[relay] = max(-8, min(8, rssi_drift[relay]))
-                return base_rssi[relay] + rssi_drift[relay]
-
-            choices = [
-                ([0x21],    "00AB"),
-                ([],        "01AB"),
-                ([0x22],    "02AB"),
-                ([0x21,0x22],"03AB"),
-                ([0x21],    "04AB"),
-                ([0x22],    "05AB"),
-                ([],        "06AB"),
-                ([0x21],    "07AB"),
-            ]
-
-            for pid, (chosen, payload) in enumerate(choices, start=1):
-                await _check_cancel()
-                r21_rssi = vary("0x21")
-                r22_rssi = vary("0x22")
-                r21_stamps = [{"id":"0x21","rssi":r21_rssi}]
-                r22_stamps = [{"id":"0x22","rssi":r22_rssi}]
-                double_stamps = [{"id":"0x21","rssi":r21_rssi},{"id":"0x22","rssi":r22_rssi+3}]
-
-                # RREQ 直达
-                rec(0x30, 0x10, MSG_RREQ, pid, 0, [], [])
-                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-                       "pathId":pid,"count":0,"rssiStamps":[],"relays":[],
-                       "dataHex":"0000000000000000","checksum":0})
-                await asyncio.sleep(0.10)
-                await _check_cancel()
-
-                # RREQ 经 0x21
-                rec(0x30, 0x10, MSG_RREQ, pid, 1, r21_stamps, [])
-                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-                       "pathId":pid,"count":1,"rssiStamps":r21_stamps,"relays":[],
-                       "dataHex":stamps_hex(r21_stamps),"checksum":0})
-                await asyncio.sleep(0.10)
-                await _check_cancel()
-
-                # RREQ 经 0x22
-                rec(0x30, 0x10, MSG_RREQ, pid, 1, r22_stamps, [])
-                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-                       "pathId":pid,"count":1,"rssiStamps":r22_stamps,"relays":[],
-                       "dataHex":stamps_hex(r22_stamps),"checksum":0})
-                await asyncio.sleep(0.10)
-                await _check_cancel()
-
-                # RREQ 双跳
-                rec(0x30, 0x10, MSG_RREQ, pid, 2, double_stamps, [])
-                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_RREQ,"msgTypeName":"RREQ",
-                       "pathId":pid,"count":2,"rssiStamps":double_stamps,"relays":[],
-                       "dataHex":stamps_hex(double_stamps),"checksum":0})
-                await asyncio.sleep(0.10)
-                await _check_cancel()
-
-                # 裁决窗口
-                await asyncio.sleep(0.20)
-                await _check_cancel()
-
-                # RREP
-                dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
-                rec(0x10, 0x30, MSG_RREP, pid, len(chosen), [], chosen)
-                bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_RREP,"msgTypeName":"RREP",
-                       "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                       "dataHex":dhex,"checksum":0})
-                await asyncio.sleep(0.12)
-                for _ in chosen:
-                    bcast({"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_RREP,"msgTypeName":"RREP",
-                           "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                           "dataHex":dhex,"checksum":0})
-                    await asyncio.sleep(0.06)
-
-                # DATA
-                dhex = ("".join(f"{c:02X}" for c in chosen) + payload).ljust(16, '0')
-                rec(0x30, 0x10, MSG_DATA, pid, len(chosen), [], chosen)
-                bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_DATA,"msgTypeName":"DATA",
-                       "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                       "dataHex":dhex,"checksum":0})
-                await asyncio.sleep(0.12)
-                await _check_cancel()
-
-                # ACK 超时重传（最多 3 次）
-                import random
-                ack_sent = 0
-                ack_success = False
-                while ack_sent < 3 and not ack_success:
-                    await _check_cancel()
-                    ack_sent += 1
-                    dhex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
-                    rec(0x10, 0x30, MSG_ACK, pid, len(chosen), [], chosen)
-                    ack_frame = {"type":"frame","src":0x10,"dest":0x30,"msgType":MSG_ACK,"msgTypeName":"ACK",
-                           "pathId":pid,"count":len(chosen),"rssiStamps":[],"relays":chosen,
-                           "dataHex":dhex,"checksum":0}
-                    if ack_sent > 1:
-                        ack_frame["_retry"] = ack_sent  # 前端可展示重传次数
-                    bcast(ack_frame)
-                    # 模拟超时等待（150~250ms）
-                    await asyncio.sleep(0.18)
-                    await _check_cancel()
-                    # 模拟确认：第1次 70% 成功率，第2次 90%，第3次必然成功
-                    success_rate = 0.7 if ack_sent == 1 else 0.9 if ack_sent == 2 else 1.0
-                    ack_success = random.random() < success_rate
-
-                # ACK 成功 → sender 回 ACK_CONFIRM
-                if ack_success:
-                    await asyncio.sleep(0.05)
-                    await _check_cancel()
-                    rec(0x30, 0x10, MSG_ACK_CONFIRM, pid, len(chosen), [], chosen)
-                    cfm_hex = "".join(f"{c:02X}" for c in chosen).ljust(16, '0')
-                    bcast({"type":"frame","src":0x30,"dest":0x10,"msgType":MSG_ACK_CONFIRM,
-                           "msgTypeName":"ACK_CFM","pathId":pid,"count":len(chosen),
-                           "rssiStamps":[],"relays":chosen,"dataHex":cfm_hex,"checksum":0})
-                else:
-                    # ACK 重传全部耗尽 → 路由失效
-                    stats.current_route = None
-                    stats.mark_cycle_failed("ack")
-                    bcast({"type":"route_fail","pathId":pid,"relays":chosen,"msg":"ACK 重传耗尽，路由失效"})
-
-            return {"status":"ok","msg":f"✅ 模拟 {len(choices)} 轮 AODV-Lite 通信完成（含 RSSI 漂移）","rounds":len(choices)}
-        except asyncio.CancelledError:
-            # 广播取消通知
-            asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
-                "type":"sys","msg":"⏹ 模拟已手动停止"
-            })), loop)
-            return {"status":"cancelled","msg":"模拟已停止","rounds":0}
 
 # ════════════════════ 定时推送 ════════════════════
 ACK_TIMEOUT_SEC = 4.0  # ACK 阶段超过此时间未收到 ACK_CONFIRM 视为失败

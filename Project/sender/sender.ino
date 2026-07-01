@@ -25,11 +25,10 @@ const uint8_t MSG_KICK     = 0x08;   // 踢出命令
 const uint8_t MSG_UNKICK   = 0x09;   // 恢复命令
 const uint8_t MAX_RELAYS     = 2;
 const uint8_t FRAME_SIZE     = 16;
-const uint8_t MSG_KICK      = 0x08;
-const uint8_t MSG_UNKICK    = 0x09;
 const uint8_t MSG_CMD_PREPARE = 0x0A;
 const uint8_t MSG_CMD_READY   = 0x0B;
 const uint8_t MSG_CMD_COMMIT  = 0x0C;
+const uint8_t MSG_NODE_STATUS = 0x07;  // 节点状态上报
 const uint8_t BROADCAST_ID    = 0xFF;
 
 #pragma pack(push, 1)
@@ -87,6 +86,46 @@ bool     pendingReady = false;
 uint16_t pendingFreq  = 530;
 uint8_t  pendingSf    = 7;
 bool     pauseAODV    = false;  // 切换期间暂停正常通信
+// ★ 非阻塞 READY 退避
+bool     readyPending = false;
+uint32_t readySendTime = 0;
+uint8_t  readyStatusVal = 0;
+
+// ★ 节点状态上报
+uint16_t txPacketCount = 0;
+uint16_t rxPacketCount = 0;
+uint32_t lastStatusTime = 0;
+const uint16_t STATUS_INTERVAL = 15000;
+
+int freeMemory() {
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+}
+
+void sendNodeStatus() {
+  LoRaFrame st;
+  memset(&st, 0, FRAME_SIZE);
+  st.head[0] = FRAME_HEADER_0;
+  st.head[1] = FRAME_HEADER_1;
+  st.srcId   = MY_NODE_ID;
+  st.destId  = 0x10;
+  st.msgType = MSG_NODE_STATUS;
+  uint32_t uptime = millis() / 1000;
+  uint16_t freeRam = (uint16_t)freeMemory();
+  st.data[0] = (uptime >> 8) & 0xFF;
+  st.data[1] = uptime & 0xFF;
+  st.data[2] = (freeRam >> 8) & 0xFF;
+  st.data[3] = freeRam & 0xFF;
+  st.data[4] = (txPacketCount >> 8) & 0xFF;
+  st.data[5] = txPacketCount & 0xFF;
+  st.data[6] = (rxPacketCount >> 8) & 0xFF;
+  st.data[7] = rxPacketCount & 0xFF;
+  calcChecksum(&st);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&st, FRAME_SIZE);
+  LoRa.endPacket(); txPacketCount++;
+}
 
 // =============================================
 void setup() {
@@ -112,7 +151,30 @@ void setup() {
 void loop() {
   checkForPacket();  // ★ 即使 KICKED 也继续监听，等待 UNKICK 恢复
   if (discState == KICKED) { return; }  // 静默：不收发业务帧
+  // ★ 非阻塞 READY 发送：即使 pauseAODV 也要发
+  if (readyPending && millis() >= readySendTime) {
+    readyPending = false;
+    LoRaFrame ack;
+    memset(&ack, 0, FRAME_SIZE);
+    ack.head[0] = FRAME_HEADER_0;
+    ack.head[1] = FRAME_HEADER_1;
+    ack.srcId   = MY_NODE_ID;
+    ack.destId  = 0x10;
+    ack.msgType = MSG_CMD_READY;
+    ack.data[0] = readyStatusVal;
+    calcChecksum(&ack);
+    LoRa.beginPacket();
+    LoRa.write((uint8_t*)&ack, FRAME_SIZE);
+    LoRa.endPacket(); txPacketCount++;
+    Serial.print(F("READY tx status="));
+    Serial.println(readyStatusVal, DEC);
+  }
   if (pauseAODV) return;  // 两阶段提交进行中，暂停正常通信
+  // ★ 定期上报节点状态
+  if (millis() - lastStatusTime >= STATUS_INTERVAL) {
+    lastStatusTime = millis();
+    sendNodeStatus();
+  }
   // Heartbeat: 10s +/- 2s jitter
   if (millis() - lastHbTime >= hbInterval) {
     sendHeartbeat();
@@ -218,7 +280,7 @@ void handleCMD(LoRaFrame* rx) {
     LoRaFrame ack; memset(&ack, 0, FRAME_SIZE);
     ack.head[0]=FRAME_HEADER_0; ack.head[1]=FRAME_HEADER_1;
     ack.srcId=MY_NODE_ID; ack.destId=rx->srcId; ack.msgType=MSG_CMD_ACK; ack.data[0]=st;
-    calcChecksum(&ack); LoRa.beginPacket(); LoRa.write((uint8_t*)&ack, FRAME_SIZE); LoRa.endPacket();
+    calcChecksum(&ack); LoRa.beginPacket(); LoRa.write((uint8_t*)&ack, FRAME_SIZE); LoRa.endPacket(); txPacketCount++;
     return;
   }
 
@@ -244,7 +306,7 @@ void handleCMD(LoRaFrame* rx) {
   calcChecksum(&ack);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&ack, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.print(F("CMD_ACK tx status=")); Serial.println(status, DEC);
 }
 
@@ -270,21 +332,10 @@ void handleTwoPhase(LoRaFrame* rx) {
       pauseAODV    = true;  // 暂停通信周期
     }
 
-    // 回复 READY
-    LoRaFrame ack;
-    memset(&ack, 0, FRAME_SIZE);
-    ack.head[0] = FRAME_HEADER_0;
-    ack.head[1] = FRAME_HEADER_1;
-    ack.srcId   = MY_NODE_ID;
-    ack.destId  = 0x10;
-    ack.msgType = MSG_CMD_READY;
-    ack.data[0] = status;
-    calcChecksum(&ack);
-    LoRa.beginPacket();
-    LoRa.write((uint8_t*)&ack, FRAME_SIZE);
-    LoRa.endPacket();
-    Serial.print(F("READY tx status="));
-    Serial.println(status, DEC);
+    // ★ 非阻塞退避：sender 收到 PREPARE 较晚，短退避
+    readyStatusVal = status;
+    readySendTime  = millis() + 30;
+    readyPending   = true;
   }
   else if (msgType == MSG_CMD_COMMIT) {
     Serial.print(F("COMMIT F=")); Serial.print(freq, DEC);
@@ -296,6 +347,7 @@ void handleTwoPhase(LoRaFrame* rx) {
       LoRa.setSpreadingFactor(sf);
       LoRa.setTxPower(17);
       pendingReady = false;
+      readyPending = false;  // ★ 已切换，取消待发的 READY
       pauseAODV    = false;
       // 重置路由（新频道需要重新发现）
       route.valid = false;
@@ -320,7 +372,7 @@ void sendHeartbeat() {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.print(F("HB tx r="));
   Serial.println(LoRa.packetRssi(), DEC);
 }
@@ -337,7 +389,7 @@ void sendJOIN() {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   joinSendTime = millis();
   Serial.print(F("JOIN tx -> 0x"));
   Serial.println(DEST_ID, HEX);
@@ -359,7 +411,7 @@ void sendRREQ() {
 
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
 
   discState    = WAITING_RREP;
   rreqSendTime = millis();
@@ -562,7 +614,7 @@ void handleACKFrame(LoRaFrame* frame) {
   calcChecksum(&confirm);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&confirm, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
 
   // ★ 通信成功 → 更新已知中继列表（供下轮缺失检测用）
   knownRelayCount = route.relayCount;
@@ -600,7 +652,7 @@ void sendData() {
 
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
 
   Serial.print(F("DATA tx ctr="));
   Serial.print(sampleCounter - 1, DEC);

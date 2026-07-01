@@ -50,11 +50,10 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
       <option value="9600" selected>9600</option><option value="115200">115200</option></select>
     <button id="btn-serial" onclick="toggleSerial()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md text-white" style="background:var(--cyan);">🔌 打开串口</button>
     <div class="w-px h-5" style="background:var(--brd);"></div>
-    <button id="btn-simulate" onclick="triggerSimulate()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md text-white" style="background:var(--purple);">🧪 模拟</button>
-    <button id="btn-autodemo" onclick="toggleAutoDemo()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">▶ 自动演示</button>
     <button onclick="showChannelPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">⚙️ 信道</button>
     <button onclick="showWhitelistPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📋 白名单</button>
     <button id="btn-reset" onclick="resetAll()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:#ef4444;">🗑️ 清除</button>
+    <button onclick="exportLogs()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📥 导出日志</button>
     <div class="w-px h-5" style="background:var(--brd);"></div>
     <div id="ws-dot" class="w-2.5 h-2.5 rounded-full" style="background:var(--red);box-shadow:0 0 8px var(--red);"></div>
     <span id="ws-label" class="text-xs font-mono" style="color:var(--mut);">离线</span>
@@ -148,7 +147,10 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 <!-- ════════════ CHANNEL CONFIG PANEL ════════════ -->
 <div id="channel-panel" class="fixed right-0 top-0 h-full w-80 z-50 shadow-2xl flex flex-col" style="background:var(--card);border-left:1px solid var(--brd);transform:translateX(100%);transition:transform .3s ease;display:none;">
   <div class="flex items-center justify-between px-4 py-3 border-b flex-shrink-0" style="border-color:var(--brd);">
-    <h3 class="font-bold" style="color:var(--cyan);">⚙️ 信道配置</h3>
+    <div>
+      <h3 class="font-bold" style="color:var(--cyan);">⚙️ 信道配置</h3>
+      <p id="current-channel" class="text-sm mt-0.5 font-mono font-bold" style="color:#22d3ee;">530MHz SF7</p>
+    </div>
     <button onclick="hideChannelPanel()" class="text-xl leading-none" style="color:var(--mut);">&times;</button>
   </div>
   <div class="flex-1 overflow-y-auto custom-scroll p-4 space-y-4">
@@ -185,6 +187,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
     <div id="channel-progress" class="rounded-lg p-3 hidden" style="background:var(--bg);border:1px solid var(--brd);">
       <div class="text-xs font-bold mb-2" style="color:var(--mut);">🔄 切换进度</div>
       <div id="channel-progress-steps" class="space-y-2 text-xs"></div>
+      <div id="channel-result-banner" class="mt-3 px-3 py-2 rounded hidden text-xs font-bold"></div>
     </div>
 
   </div>
@@ -227,7 +230,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 
 <script>
 // ════════════════════ 常量 ════════════════════
-const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_ACK_CONFIRM=0x06,MSG_KICK=0x08,MSG_UNKICK=0x09,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22;
+const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_ACK_CONFIRM=0x06,MSG_KICK=0x08,MSG_UNKICK=0x09,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22,MSG_PREPARE=0x0A,MSG_READY=0x0B,MSG_COMMIT=0x0C,MSG_NODE_STATUS=0x07;
 const MSG_META={
   [MSG_RREQ]:['RREQ','路由发现','#f97316'],
   [MSG_RREP]:['RREP','路由应答','#22d3ee'],
@@ -242,6 +245,10 @@ const MSG_META={
   [MSG_JOIN]:['JOIN','入网请求','#ec4899'],
   [MSG_JOIN_OK]:['JOIN_OK','入网允许','#22c55e'],
   [MSG_JOIN_NO]:['JOIN_NO','入网拒绝','#ef4444'],
+  [MSG_PREPARE]:['PREPARE','信道准备','#0ea5e9'],
+  [MSG_READY]:['READY','信道就绪','#22d3ee'],
+  [MSG_COMMIT]:['COMMIT','信道切换','#a78bfa'],
+  [MSG_NODE_STATUS]:['STATUS','节点状态','#22c55e'],
 };
 const NODE_META={
   0x10:{role:'主节点',en:'mainTerm',color:'#f97316',size:60,cat:0},
@@ -269,10 +276,12 @@ let linkRssiHistory={}; // {linkKey: [{time, rssi}, ...]}
 let currentRoute=null;
 let logFilter='all',logEntries=[];
 let selectedTab='log',selectedNodeHex=null;
-let autoDemoId=null;
+// ── 信道状态追踪 ──
+let currentFreq=530, currentSf=7;  // 当前全网信道（初始 530MHz SF7）
 // ── 组网状态 & 拓扑节流 ──
 let networkReady=false;           // 组网完成后才显示串口日志
 let joinedNodeSet=new Set();      // 已入网的节点 ID
+let nodeStatuses={};              // ★ 节点运行时状态缓存 {nodeHex: {uptime,freeRAM,txPkts,rxPkts,freq,sf,updated}}
 let topoThrottle=null;            // 拓扑渲染节流定时器
 
 
@@ -630,6 +639,8 @@ setInterval(checkPhaseTimeout,2000);  // 每 2 秒检查一次
 
 // ════════════════════ 拓扑更新 ════════════════════
 function ensureNode(decId,now){
+  // ★ 防御：广播地址 0xFF 不应进入拓扑
+  if(decId===0xFF)return null;
   const h=hex(decId),m=meta(decId);
   if(!activeNodes[h]){
     activeNodes[h]={id:h,name:`${m.role}\n${hexS(decId)}`,cat:m.cat,size:m.size,color:m.color,lastSeen:now,decId:decId};
@@ -770,6 +781,18 @@ function renderNodeDetail(nodeHex){
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">类别</div><div class="font-bold text-sm" style="color:${n.color};">${m.role}</div></div>
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">最后活跃</div><div class="text-sm">${n.id==='PC'?'始终在线':n.id==='0x10'&&!isSerialOpen?'未连接':idle<0?'暂无数据':idle+'s 前'}</div></div>
     </div>
+    ${(nodeHex!=='PC'&&nodeStatuses[nodeHex])?`
+    <div class="text-xs font-bold mt-2 mb-1" style="color:var(--green);">📊 节点运行时状态</div>
+    <div class="grid grid-cols-2 gap-2">
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">运行时长</div><div class="font-mono text-sm" style="color:#22d3ee;">${(()=>{const s=nodeStatuses[nodeHex].uptime;const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return h>0?h+'h'+m+'m'+ss+'s':m+'m'+ss+'s';})()}</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">空闲内存</div><div class="font-mono text-sm" style="color:${nodeStatuses[nodeHex].freeRAM>500?'#22c55e':nodeStatuses[nodeHex].freeRAM>200?'#eab308':'#ef4444'};">${nodeStatuses[nodeHex].freeRAM} B</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">发送包数</div><div class="font-mono text-sm" style="color:#a78bfa;">${nodeStatuses[nodeHex].txPkts}</div></div>
+      <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">接收包数</div><div class="font-mono text-sm" style="color:#22d3ee;">${nodeStatuses[nodeHex].rxPkts}</div></div>
+      ${nodeStatuses[nodeHex].freq?`<div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">当前频率</div><div class="font-mono text-sm">${nodeStatuses[nodeHex].freq}MHz</div></div>`:''}
+      ${nodeStatuses[nodeHex].sf?`<div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">扩频因子</div><div class="font-mono text-sm">SF${nodeStatuses[nodeHex].sf}</div></div>`:''}
+    </div>
+    <div class="text-[10px] mt-1" style="color:var(--mut);">状态更新: ${((Date.now()-nodeStatuses[nodeHex].updated)/1000).toFixed(0)}s 前</div>
+    `:nodeHex!=='PC'?'<div class="text-xs mt-2 rounded p-2 text-center" style="background:var(--bg);color:var(--mut);">⏳ 等待节点状态数据...<br/><span class="text-[10px]">节点每15s自动上报</span></div>':''}
     <div class="text-xs font-bold mt-2" style="color:var(--mut);">相关链路 (${nodeLinks.length})</div>
     ${nodeLinks.map(l=>{
       const age=l.lastUpdated?((Date.now()-l.lastUpdated)/1000).toFixed(0):-1;
@@ -893,6 +916,27 @@ function setLogFilter(f,btn){
   renderLogs();
 }
 
+// ★ 导出日志
+function exportLogs(){
+  const all=logEntries.slice(0).reverse();  // 时间正序
+  let text='═══ 通信系统日志导出 ═══\n';
+  text+='导出时间: '+new Date().toLocaleString('zh-CN')+'\n';
+  text+='当前信道: '+currentFreq+'MHz SF'+currentSf+'\n';
+  text+='总条目: '+logEntries.length+'\n';
+  text+='════════════════════════════════════\n\n';
+  for(const e of all){
+    const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
+    text+='['+e.title+']\n'+t+'\n'+e.detail.replace(/<[^>]*>/g,'')+'\n\n';
+  }
+  const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='comm-log-'+new Date().toISOString().slice(0,19).replace(/:/g,'-')+'.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  addLog('SYS','导出','📥 日志已导出 ('+logEntries.length+' 条)','#22c55e');
+}
+
 // ════════════════════ 信道面板 ════════════════════
 function showChannelPanel(){const p=document.getElementById('channel-panel');p.style.display='flex';requestAnimationFrame(()=>{p.style.transform='translateX(0)';});}
 function hideChannelPanel(){const p=document.getElementById('channel-panel');p.style.transform='translateX(100%)';setTimeout(()=>{p.style.display='none';},300);}
@@ -905,21 +949,34 @@ function sendPowerConfig(){
   addLog('SYS','功率',`下发至${node}: ${power}dBm`,'#f59e0b');
 }
 
+function updateChannelDisplay(){
+  const el=document.getElementById('current-channel');
+  if(el)el.textContent=`${currentFreq}MHz SF${currentSf}`;
+}
+// 页面加载时初始化信道显示
+updateChannelDisplay();
+
+// ★ READY 去重：PREPARE 重试会导致节点多次回复 READY
+let _readyNodesSeen=new Set();
+
 function startChannelSwitch(){
-  const freq=document.getElementById('cfg-freq-all').value;
-  const sf=document.getElementById('cfg-sf-all').value;
+  const freq=parseInt(document.getElementById('cfg-freq-all').value);
+  const sf=parseInt(document.getElementById('cfg-sf-all').value);
   if(!freq||freq<137||freq>1020){alert('频率范围: 137-1020 MHz');return;}
   const cmd=`CFG_ALL:F${freq}:S${sf}`;
   if(!globalWs||globalWs.readyState!==1){addLog('SYS','信道','❌ WebSocket 未连接','#ef4444');return;}
   globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
-  addLog('SYS','信道',`发起全网切换: ${freq}MHz SF${sf}`,'#22d3ee');
+  addLog('SYS','信道',`发起全网切换: ${currentFreq}MHz SF${currentSf} → ${freq}MHz SF${sf}`,'#22d3ee');
 
   const prog=document.getElementById('channel-progress');
   prog.classList.remove('hidden');
+  const banner=document.getElementById('channel-result-banner');
+  banner.classList.add('hidden');
+  _readyNodesSeen=new Set();  // ★ 新一轮切换，清空 READY 去重记录
   document.getElementById('channel-progress-steps').innerHTML=`
-    <div class="flex items-center gap-2" id="step-prepare"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:var(--cyan);color:#fff;">●</span><span>PREPARE — 广播切换参数...</span></div>
-    <div class="flex items-center gap-2" id="step-commit" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>COMMIT — 等待节点就绪...</span></div>
-    <div class="flex items-center gap-2" id="step-verify" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>VERIFY — 验证新频道...</span></div>
+    <div class="flex items-center gap-2" id="step-prepare"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:var(--cyan);color:#fff;">●</span><span>PREPARE — 广播切换参数 (${freq}MHz SF${sf}) ...</span></div>
+    <div class="flex items-center gap-2" id="step-commit" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>COMMIT — 收集节点就绪...</span></div>
+    <div class="flex items-center gap-2" id="step-verify" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>VERIFY — 等待心跳，确认新信道...</span></div>
     <div id="ready-nodes" class="text-[10px] pl-7" style="color:var(--mut);"></div>
   `;
   document.getElementById('btn-channel-switch').disabled=true;
@@ -1041,40 +1098,14 @@ function wlRender(){
 
 
 
-let simulating=false;
 
-function toggleAutoDemo(){
-  const btn=document.getElementById('btn-autodemo');
-  if(autoDemoId){
-    // 停止自动演示
-    clearInterval(autoDemoId);autoDemoId=null;
-    btn.innerHTML='▶ 自动演示';btn.style.background='var(--card)';btn.style.color='var(--txt)';btn.style.border='1px solid var(--brd)';
-    // 同时停止模拟
-    if(simulating)stopSimulate();
-  }else{
-    btn.innerHTML='⏸ 停止演示';btn.style.background='var(--green)';btn.style.color='#fff';btn.style.border='none';
-    triggerSimulate();autoDemoId=setInterval(()=>triggerSimulate(),6000);
-  }
-}
 
-async function stopSimulate(){
-  addLog('SYS','模拟','正在发送停止信号...','#eab308');
-  try{await fetch('/api/stop_simulate');}catch(e){}
-  // 重置按钮状态
-  simulating=false;
-  const btn=document.getElementById('btn-simulate');
-  btn.innerHTML='🧪 模拟';btn.style.background='var(--purple)';
-}
 
 function clearFrontendState(){
-  // 停止模拟 & 自动演示
-  if(simulating){fetch('/api/stop_simulate').catch(()=>{});simulating=false;
-    const simBtn=document.getElementById('btn-simulate');simBtn.innerHTML='🧪 模拟';simBtn.style.background='var(--purple)';}
-  if(autoDemoId){clearInterval(autoDemoId);autoDemoId=null;
-    const demoBtn=document.getElementById('btn-autodemo');demoBtn.innerHTML='▶ 自动演示';demoBtn.style.background='var(--card)';demoBtn.style.color='var(--txt)';demoBtn.style.border='1px solid var(--brd)';}
   // 重置节点 → 仅保留 PC
   activeNodes={'PC':{id:'PC',name:'PC 网关',cat:4,size:65,color:'#0ea5e9',lastSeen:Date.now(),decId:0}};
   activeLinks={};linkRssiCache={};linkRssiHistory={};currentRoute=null;
+  nodeStatuses={};
   joinedNodeSet=new Set();networkReady=false;
   // 重置统计 & 阶段
   lastStats={};lastPhase=null;phaseStartTime=Date.now();
@@ -1095,31 +1126,6 @@ async function resetAll(){
   addLog('SYS','刷新','页面已重置，所有状态已清除','#22c55e');
 }
 
-async function triggerSimulate(){
-  // 如果正在模拟，则停止
-  if(simulating){
-    await stopSimulate();
-    // 如果自动演示也在跑，一并停止
-    if(autoDemoId){clearInterval(autoDemoId);autoDemoId=null;
-      const demoBtn=document.getElementById('btn-autodemo');
-      demoBtn.innerHTML='▶ 自动演示';demoBtn.style.background='var(--card)';demoBtn.style.color='var(--txt)';demoBtn.style.border='1px solid var(--brd)';
-    }
-    return;
-  }
-  // 开始模拟
-  simulating=true;
-  const btn=document.getElementById('btn-simulate');
-  btn.innerHTML='⏹ 停止模拟';btn.style.background='#ef4444';
-  addLog('SYS','模拟','正在触发模拟通信...','#a78bfa');
-  try{
-    const r=await fetch('/api/simulate');const d=await r.json();
-    if(d.status==='cancelled'){addLog('SYS','模拟',d.msg,'#eab308');}
-    else{addLog('SYS','完成',d.msg,'#22c55e');}
-  }catch(e){addLog('SYS','错误',String(e),'#ef4444');}
-  // 恢复按钮
-  simulating=false;
-  btn.innerHTML='🧪 模拟';btn.style.background='var(--purple)';
-}
 
 // ════════════════════ 垃圾回收 + 老化标记 ════════════════════
 setInterval(()=>{
@@ -1258,13 +1264,21 @@ function connectWS(){
       const steps=document.getElementById('channel-progress-steps');
       if(!steps)return;
       if(d.phase==='prepare'){
+        // ★ 记录目标信道，供 channel_switch_result 成功后更新显示
+        if(d.freq)window._pendingFreq=d.freq;
+        if(d.sf)window._pendingSf=d.sf;
         addLog('SYS','2PC',d.msg,'#22d3ee');
       }else if(d.phase==='ready'){
-        const readyDiv=document.getElementById('ready-nodes');
-        if(readyDiv){
-          readyDiv.innerHTML+=(d.status===0
-            ?`<span style="color:#22c55e;">✅ ${d.nodeHex} 已就绪</span> `
-            :`<span style="color:#ef4444;">❌ ${d.nodeHex} 参数不支持</span> `);
+        // ★ 去重：同一节点多次 READY（因 PREPARE 重试）只显示一次
+        const nodeKey='ready_'+d.nodeHex;
+        if(!_readyNodesSeen.has(nodeKey)){
+          _readyNodesSeen.add(nodeKey);
+          const readyDiv=document.getElementById('ready-nodes');
+          if(readyDiv){
+            readyDiv.innerHTML+=(d.status===0
+              ?`<span style="color:#22c55e;">✅ ${d.nodeHex} 已就绪</span> `
+              :`<span style="color:#ef4444;">❌ ${d.nodeHex} 参数不支持</span> `);
+          }
         }
         addLog('SYS','2PC',d.msg,d.status===0?'#22c55e':'#ef4444');
       }else if(d.phase==='commit'){
@@ -1280,25 +1294,81 @@ function connectWS(){
       }
       return;
     }
+    // ★ 节点状态上报
+    if(d.type==='node_status'){
+      nodeStatuses[d.nodeHex]={uptime:d.uptime,freeRAM:d.freeRAM,txPkts:d.txPkts,rxPkts:d.rxPkts,freq:d.freq||null,sf:d.sf||null,updated:Date.now()};
+      // 如果当前正在查看该节点详情，实时刷新
+      if(selectedTab==='node'&&selectedNodeHex===d.nodeHex)renderNodeDetail(selectedNodeHex);
+      return;
+    }
     if(d.type==='channel_switch_result'){
+      // ★ 兜底：如果 COMMIT 进度事件没到达，在结果到来时补亮 COMMIT 步骤
+      const commitStep=document.getElementById('step-commit');
+      if(commitStep){
+        commitStep.style.opacity='1';
+        const cs=commitStep.querySelector('span:first-child');
+        if(cs){cs.style.background='var(--cyan)';cs.style.color='#fff';cs.style.borderColor='var(--cyan)';cs.textContent='●';}
+      }
       const verifyStep=document.getElementById('step-verify');
+      const readyDiv=document.getElementById('ready-nodes');
+      const isAllOnline=d.onlineCount===d.totalNodes;
+      // 逐节点状态展示
+      if(readyDiv&&d.nodes){
+        let nodeHtml='';
+        const nodeNames={'0x21':'中继 relay21','0x22':'中继 relay22','0x30':'终端 sender'};
+        for(const[nid,st]of Object.entries(d.nodes)){
+          const name=nodeNames[nid]||nid;
+          if(st.online){nodeHtml+=`<br/><span style="color:#22c55e;">✅ ${nid} ${name} — 在线</span>`;}
+          else if(st.ready){nodeHtml+=`<br/><span style="color:#f59e0b;">⚠ ${nid} ${name} — 已就绪但离线（可能切换后未收到心跳）</span>`;}
+          else{nodeHtml+=`<br/><span style="color:#ef4444;">❌ ${nid} ${name} — 未就绪</span>`;}
+        }
+        readyDiv.innerHTML+=nodeHtml;
+      }
       if(verifyStep){
         verifyStep.style.opacity='1';
-        if(d.onlineCount===d.totalNodes){
-          verifyStep.querySelector('span:first-child').style.background='#22c55e';
-          verifyStep.querySelector('span:first-child').style.color='#fff';
-          verifyStep.querySelector('span:first-child').style.borderColor='#22c55e';
-          verifyStep.querySelector('span:first-child').textContent='✓';
-          document.getElementById('ready-nodes').innerHTML+=`<br/><span style="color:#22c55e;">✅ 全部 ${d.onlineCount}/${d.totalNodes} 节点在线</span>`;
-        }else{
-          verifyStep.querySelector('span:first-child').style.background='#f59e0b';
-          verifyStep.querySelector('span:first-child').style.color='#fff';
-          verifyStep.querySelector('span:first-child').style.borderColor='#f59e0b';
-          verifyStep.querySelector('span:first-child').textContent='⚠';
-          document.getElementById('ready-nodes').innerHTML+=`<br/><span style="color:#f59e0b;">⚠ ${d.onlineCount}/${d.totalNodes} 节点在线</span>`;
+        verifyStep.querySelector('span:first-child').style.background=isAllOnline?'#22c55e':'#f59e0b';
+        verifyStep.querySelector('span:first-child').style.color='#fff';
+        verifyStep.querySelector('span:first-child').style.borderColor=isAllOnline?'#22c55e':'#f59e0b';
+        verifyStep.querySelector('span:first-child').textContent=isAllOnline?'✓':'⚠';
+        if(readyDiv){
+          const summaryColor=isAllOnline?'#22c55e':(d.onlineCount>0?'#f59e0b':'#ef4444');
+          const summaryIcon=isAllOnline?'✅':(d.onlineCount>0?'⚠':'❌');
+          readyDiv.innerHTML+=`<br/><span style="color:${summaryColor};font-weight:bold;">${summaryIcon} 切换${isAllOnline?'成功':'部分成功'}: ${d.onlineCount}/${d.totalNodes} 节点在新信道在线</span>`;
         }
       }
-      addLog('SYS','2PC',d.msg,d.onlineCount===d.totalNodes?'#22c55e':'#f59e0b');
+      // ★ 更新当前信道显示
+      if(isAllOnline){
+        // 从两阶段提交事件中推断的新频率（在 two_phase_progress prepare 中记录）
+        // 这里用节点全部在线作为切换成功的信号
+        const el=document.getElementById('current-channel');
+        if(el&&window._pendingFreq){
+          currentFreq=window._pendingFreq; currentSf=window._pendingSf;
+          el.textContent=`${currentFreq}MHz SF${currentSf}`;
+          el.style.color='#22d3ee';
+          // 同步更新输入框默认值
+          document.getElementById('cfg-freq-all').value=currentFreq;
+          document.getElementById('cfg-sf-all').value=currentSf;
+        }
+      }
+      // ★ 结果横幅：醒目显示最终状态
+      const banner=document.getElementById('channel-result-banner');
+      if(banner){
+        banner.classList.remove('hidden');
+        if(isAllOnline){
+          banner.style.background='#22c55e18'; banner.style.border='1px solid #22c55e';
+          banner.style.color='#22c55e';
+          banner.innerHTML='✅ 切换成功 — 全网已迁移到新信道，节点心跳正常';
+        }else if(d.onlineCount>0){
+          banner.style.background='#f59e0b18'; banner.style.border='1px solid #f59e0b';
+          banner.style.color='#f59e0b';
+          banner.innerHTML=`⚠️ 部分成功 — ${d.onlineCount}/${d.totalNodes} 在线，离线节点可能需重启`;
+        }else{
+          banner.style.background='#ef444418'; banner.style.border='1px solid #ef4444';
+          banner.style.color='#ef4444';
+          banner.innerHTML='❌ 切换失败 — 所有节点离线，请检查硬件并手动恢复信道';
+        }
+      }
+      addLog('SYS','信道切换',d.msg,isAllOnline?'#22c55e':'#f59e0b');
       const btn=document.getElementById('btn-channel-switch');
       if(btn){btn.disabled=false;btn.style.opacity='1';}
       return;
@@ -1397,7 +1467,7 @@ function connectWS(){
       detail+=`<br/><span style="color:var(--mut);font-size:10px;">data: ${d.dataHex}</span>`;
       const logTitle=m[0]+' '+m[1]+(d._retry?' (重传#'+d._retry+')':'');
       addLog(m[0],logTitle,detail,m[2]);
-      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK||d.msgType===MSG_ACK_CONFIRM){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{ensureNode(d.src,Date.now());if(d.dest!==0x00)ensureNode(d.dest,Date.now());renderTopo();}
+      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK||d.msgType===MSG_ACK_CONFIRM){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{if(d.src!==0xFF)ensureNode(d.src,Date.now());if(d.dest!==0x00&&d.dest!==0xFF)ensureNode(d.dest,Date.now());renderTopo();}
       if(d.stats)updateStats(d.stats);
     }
   };

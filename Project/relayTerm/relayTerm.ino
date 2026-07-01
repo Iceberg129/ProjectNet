@@ -25,6 +25,7 @@ const uint8_t MSG_CMD_ACK = 0x05;
 const uint8_t MSG_CMD_PREPARE = 0x0A;
 const uint8_t MSG_CMD_READY   = 0x0B;
 const uint8_t MSG_CMD_COMMIT  = 0x0C;
+const uint8_t MSG_NODE_STATUS = 0x07;  // 节点状态上报
 const uint8_t BROADCAST_ID    = 0xFF;
 const uint8_t MSG_HB       = 0x03;   // heartbeat
 const uint8_t MSG_KICK     = 0x08;   // 踢出命令
@@ -76,6 +77,10 @@ uint8_t  fwdHistIdx = 0;
 bool     pendingReady = false;
 uint16_t pendingFreq  = 530;
 uint8_t  pendingSf    = 7;
+// ★ 非阻塞 READY 退避
+bool     readyPending = false;
+uint32_t readySendTime = 0;
+uint8_t  readyStatusVal = 0;
 
 bool wasForwarded(uint8_t srcId, uint8_t destId, uint8_t pathId, uint8_t msgType) {
   for (uint8_t i = 0; i < FWD_HISTORY; i++) {
@@ -101,6 +106,42 @@ void markForwarded(uint8_t srcId, uint8_t destId, uint8_t pathId, uint8_t msgTyp
 }
 
 bool gKicked = false;  // ★ 踢出标志
+
+// ★ 节点状态上报
+uint16_t txPacketCount = 0;
+uint16_t rxPacketCount = 0;
+uint32_t lastStatusTime = 0;
+const uint16_t STATUS_INTERVAL = 15000;
+
+int freeMemory() {
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+}
+
+void sendNodeStatus() {
+  LoRaFrame st;
+  memset(&st, 0, FRAME_SIZE);
+  st.head[0] = FRAME_HEADER_0;
+  st.head[1] = FRAME_HEADER_1;
+  st.srcId   = MY_NODE_ID;
+  st.destId  = 0x10;
+  st.msgType = MSG_NODE_STATUS;
+  uint32_t uptime = millis() / 1000;
+  uint16_t freeRam = (uint16_t)freeMemory();
+  st.data[0] = (uptime >> 8) & 0xFF;
+  st.data[1] = uptime & 0xFF;
+  st.data[2] = (freeRam >> 8) & 0xFF;
+  st.data[3] = freeRam & 0xFF;
+  st.data[4] = (txPacketCount >> 8) & 0xFF;
+  st.data[5] = txPacketCount & 0xFF;
+  st.data[6] = (rxPacketCount >> 8) & 0xFF;
+  st.data[7] = rxPacketCount & 0xFF;
+  calcChecksum(&st);
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&st, FRAME_SIZE);
+  LoRa.endPacket(); txPacketCount++;
+}
 
 // =============================================
 void setup() {
@@ -132,7 +173,30 @@ void loop() {
     lastCheck = millis();
     handlePacket();  // ★ 即使 KICKED 也继续监听，等待 UNKICK
   }
+  // ★ 非阻塞 READY 发送：定时器到期后发送，期间正常收包
+  if (readyPending && millis() >= readySendTime) {
+    readyPending = false;
+    LoRaFrame ack;
+    memset(&ack, 0, FRAME_SIZE);
+    ack.head[0] = FRAME_HEADER_0;
+    ack.head[1] = FRAME_HEADER_1;
+    ack.srcId   = MY_NODE_ID;
+    ack.destId  = 0x10;
+    ack.msgType = MSG_CMD_READY;
+    ack.data[0] = readyStatusVal;
+    calcChecksum(&ack);
+    LoRa.beginPacket();
+    LoRa.write((uint8_t*)&ack, FRAME_SIZE);
+    LoRa.endPacket(); txPacketCount++;
+    Serial.print(F("READY tx status="));
+    Serial.println(readyStatusVal, DEC);
+  }
   if (gKicked) { return; }  // 静默：不转发不发送（但仍监听 UNKICK，已在上方 handlePacket 处理）
+  // ★ 定期上报节点状态
+  if (millis() - lastStatusTime >= STATUS_INTERVAL) {
+    lastStatusTime = millis();
+    sendNodeStatus();
+  }
   // Heartbeat: 10s +/- 2s jitter
   if (millis() - lastHbTime >= hbInterval) {
     sendHeartbeat();
@@ -155,7 +219,7 @@ void servicePending() {
     // 发送一份
     LoRa.beginPacket();
     LoRa.write((uint8_t*)&pending[p].frame, FRAME_SIZE);
-    LoRa.endPacket();
+    LoRa.endPacket(); txPacketCount++;
 
     pending[p].retries--;
     if (pending[p].retries > 0) {
@@ -260,7 +324,7 @@ void sendHeartbeat() {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.println(F("HB tx"));
 }
 
@@ -314,6 +378,7 @@ void handlePacket() {
       case MSG_CMD_ACK:   handleCMD();            break;
       case MSG_CMD_PREPARE:
       case MSG_CMD_COMMIT: handleTwoPhase(); break;
+      case MSG_CMD_READY: handleREADY(rssi); break;  // ★ 转发其他节点的 READY
       case MSG_CMD:
       case MSG_ACK:   handleACK();       break;
       case MSG_ACK_CONFIRM: handleACK(); break;
@@ -501,21 +566,10 @@ void handleTwoPhase() {
       pendingReady = true;
     }
 
-    // Reply READY to mainTerm
-    LoRaFrame ack;
-    memset(&ack, 0, FRAME_SIZE);
-    ack.head[0] = FRAME_HEADER_0;
-    ack.head[1] = FRAME_HEADER_1;
-    ack.srcId   = MY_NODE_ID;
-    ack.destId  = 0x10;
-    ack.msgType = MSG_CMD_READY;
-    ack.data[0] = status;
-    calcChecksum(&ack);
-    LoRa.beginPacket();
-    LoRa.write((uint8_t*)&ack, FRAME_SIZE);
-    LoRa.endPacket();
-    Serial.print(F("READY tx status="));
-    Serial.println(status, DEC);
+    // ★ 非阻塞退避：等 PREPARE 转发活动结束（~220ms）后再发 READY
+    readyStatusVal = status;
+    readySendTime  = millis() + 300 + (MY_NODE_ID & 0x0F) * 60;
+    readyPending   = true;
 
     // Forward PREPARE (TTL limit)
     if (ttl > 1) {
@@ -540,6 +594,7 @@ void handleTwoPhase() {
       LoRa.setSpreadingFactor(sf);
       LoRa.setTxPower(17);
       pendingReady = false;
+      readyPending = false;  // ★ 已切换，取消待发的 READY
       Serial.println(F("COMMIT applied"));
     } else {
       Serial.println(F("COMMIT ignored (no PREPARE)"));
@@ -556,6 +611,21 @@ void handleTwoPhase() {
       }
     }
   }
+}
+
+// =============================================
+// READY 转发：让远端节点的就绪确认能通过中继到达主节点
+// =============================================
+void handleREADY(int8_t rssi) {
+  // 不转发自己发出的 READY（已在 handleTwoPhase 中直接发送）
+  if (rxFrame.srcId == MY_NODE_ID) return;
+  if (wasForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType)) {
+    Serial.println(F("  READY dup"));
+    return;
+  }
+  markForwarded(rxFrame.srcId, rxFrame.destId, rxFrame.pathId, rxFrame.msgType);
+  uint16_t backoff = (MY_NODE_ID & 0x0F) * 40 + 20;
+  enqueueForward(&rxFrame, backoff, rssi, F("READY"));
 }
 
 // =============================================

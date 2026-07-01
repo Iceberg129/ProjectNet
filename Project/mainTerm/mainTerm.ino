@@ -26,6 +26,7 @@ const uint8_t MSG_UNKICK     = 0x09;   // 恢复命令
 const uint8_t MSG_CMD_PREPARE = 0x0A;  // 两阶段提交 Phase1: 准备
 const uint8_t MSG_CMD_READY   = 0x0B;  // 两阶段提交 Phase1: 节点就绪
 const uint8_t MSG_CMD_COMMIT  = 0x0C;  // 两阶段提交 Phase2: 执行切换
+const uint8_t MSG_NODE_STATUS = 0x07;  // 节点状态上报
 const uint8_t BROADCAST_ID    = 0xFF;  // 全网广播地址
 const uint8_t MAX_STAMPS     = 4;
 const uint8_t FRAME_SIZE     = 16;
@@ -93,9 +94,12 @@ uint16_t oldFreq = 530;
 uint8_t  oldSf    = 7;
 uint32_t twoPhaseTimer = 0;
 uint8_t  readyNodesMask = 0;      // bit0=0x21, bit1=0x22, bit2=0x30
+uint8_t  prepRetryCount = 0;       // ★ PREPARE 重试计数
+uint32_t prepLastRetry  = 0;       // ★ 上次重试时间
 const uint8_t READY_MASK_ALL = 0x07;  // bit0|bit1|bit2 = 0x21,0x22,0x30
 const uint32_t PREPARE_TIMEOUT = 3000;
-const uint32_t VERIFY_TIMEOUT  = 5000;
+const uint32_t PREPARE_RETRY_MS  = 1000;  // ★ 重试间隔
+const uint32_t VERIFY_TIMEOUT  = 15000;   // ★ 15s，足够等一轮心跳（8-12s）
 
 // ★ DATA 去重：同一 (srcId, pathId, data[off], data[off+1]) 2秒内不重复处理
 #define DATA_DEDUP_MS 2000
@@ -114,6 +118,18 @@ uint16_t stat_badDest      = 0;
 uint16_t stat_badChecksum  = 0;
 uint16_t stat_goodRREQ     = 0;
 uint16_t stat_goodDATA     = 0;
+
+// ★ 节点状态上报
+uint16_t txPacketCount = 0;
+uint16_t rxPacketCount = 0;
+uint32_t lastStatusTime = 0;
+const uint16_t STATUS_INTERVAL = 15000;  // 每15秒上报一次
+
+int freeMemory() {
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+}
 
 // =============================================
 void setup() {
@@ -244,18 +260,55 @@ void loop() {
     }
   }
 
+  // ★ 定期上报自身状态（通过串口文本行）
+  if (millis() - lastStatusTime >= STATUS_INTERVAL) {
+    lastStatusTime = millis();
+    uint32_t uptime = millis() / 1000;
+    int freeRam = freeMemory();
+    Serial.print(F("NODE_STATUS:"));
+    Serial.print(uptime); Serial.write(':');
+    Serial.print(freeRam); Serial.write(':');
+    Serial.print(txPacketCount); Serial.write(':');
+    Serial.print(rxPacketCount); Serial.write(':');
+    // 当前信道参数
+    Serial.print(oldFreq); Serial.write(':');  // 频率 (MHz)
+    Serial.println(oldSf);                     // SF
+  }
+
   if (jammingMode) {
     if (millis() - lastJamSend >= 1) {
       lastJamSend = millis();
       LoRa.beginPacket();
       LoRa.print(F("JAMMER_ACTIVE_JAMMER_ACTIVE"));
-      LoRa.endPacket();
+      LoRa.endPacket(); txPacketCount++;
     }
     return;
   }
 
   // ★ 两阶段提交状态机
   if (twoPhaseState == 1) {  // WAITING_READY
+    // ★ PREPARE 重试：每隔 PREPARE_RETRY_MS 重发，最多 2 次（共发 3 次）
+    if (prepRetryCount < 2 && millis() - prepLastRetry > PREPARE_RETRY_MS) {
+      // —— 内联 PREPARE 帧发送（不创建新函数，避免 Arduino 预处理器问题）——
+      LoRaFrame pf;
+      memset(&pf, 0, FRAME_SIZE);
+      pf.head[0] = FRAME_HEADER_0; pf.head[1] = FRAME_HEADER_1;
+      pf.srcId   = MY_NODE_ID; pf.destId = BROADCAST_ID;
+      pf.msgType = MSG_CMD_PREPARE;
+      pf.data[0] = (pendingFreq >> 8) & 0xFF;
+      pf.data[1] = pendingFreq & 0xFF;
+      pf.data[2] = pendingSf;
+      pf.data[3] = 2;  // TTL=2
+      calcChecksum(&pf);
+      LoRa.beginPacket();
+      LoRa.write((uint8_t*)&pf, FRAME_SIZE);
+      LoRa.endPacket(); txPacketCount++;
+      Serial.write((uint8_t*)&pf, FRAME_SIZE);
+      prepRetryCount++;
+      prepLastRetry = millis();
+      Serial.print(F("PREPARE retry #"));
+      Serial.println(prepRetryCount, DEC);
+    }
     if (millis() - twoPhaseTimer > PREPARE_TIMEOUT) {
       // 超时：部分节点未就绪，仍发 COMMIT
       Serial.print(F("2PC timeout ready=0x"));
@@ -350,7 +403,7 @@ void handlePacket() {
   // 读取原始帧（即使是错误长度也读出来看看）
   uint8_t raw[FRAME_SIZE];
   uint8_t readLen = (pktSize < FRAME_SIZE) ? pktSize : FRAME_SIZE;
-  LoRa.readBytes(raw, readLen);
+  LoRa.readBytes(raw, readLen); rxPacketCount++;
   while (LoRa.available()) LoRa.read();  // 清空残留
 
   // 1. 长度校验
@@ -549,7 +602,7 @@ void sendCmdAck(uint8_t destId, uint8_t status) {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
 }
 
@@ -792,7 +845,7 @@ void sendCMD(uint8_t destId, uint16_t freq, uint8_t sf, uint8_t power) {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
   waitingCmdAck = true;
   cmdSendTime   = millis();
@@ -819,7 +872,7 @@ void sendKick(uint8_t destId) {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
   Serial.print(F("KICKED 0x"));
   Serial.println(destId, HEX);
@@ -838,7 +891,7 @@ void sendUnkick(uint8_t destId) {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
   Serial.print(F("UNKICKED 0x"));
   Serial.println(destId, HEX);
@@ -848,6 +901,8 @@ void sendUnkick(uint8_t destId) {
 void sendPrepare() {
   twoPhaseState = 1;  // WAITING_READY
   readyNodesMask = 0;
+  prepRetryCount = 0;       // ★ 重置重试计数
+  prepLastRetry  = millis();
   twoPhaseTimer = millis();
   oldFreq = pendingFreq;  // 暂存（实际从当前 LoRa 频率获取）
   oldSf   = pendingSf;
@@ -867,7 +922,7 @@ void sendPrepare() {
 
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
 
   Serial.print(F("PREPARE tx F="));
@@ -891,10 +946,15 @@ void sendCommit() {
   frame.data[3] = 2;  // TTL=2
   calcChecksum(&frame);
 
-  // 在旧频道上发送 COMMIT
+  // 在旧频道上发送 COMMIT（发两次，防止节点恰好处于 TX 模式漏收）
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
+  Serial.write((uint8_t*)&frame, FRAME_SIZE);
+  delay(200);  // ★ 等节点回到 RX 模式
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)&frame, FRAME_SIZE);
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
 
   // 短暂等待确保发送完成
@@ -911,6 +971,13 @@ void sendCommit() {
   Serial.print(pendingFreq, DEC);
   Serial.print(F(" SF"));
   Serial.println(pendingSf, DEC);
+
+  // ★ 重置心跳状态：切频道后清零，只在收到新频道心跳后才重新标记在线
+  //    VERIFY 阶段必须确认节点在新信道上真实存活
+  for (uint8_t id = 0x21; id <= 0x30; id++) {
+    nodeLastSeen[id] = millis();
+    nodeOnline[id]   = false;
+  }
 
   twoPhaseState = 3;  // VERIFYING
   twoPhaseTimer = millis();
@@ -958,7 +1025,7 @@ void sendJoinResponse(uint8_t destId, uint8_t msgType, uint8_t statusCode) {
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
   Serial.print(msgType == MSG_JOIN_ACK ? F("JOIN_OK -> 0x") : F("JOIN_NO -> 0x"));
   Serial.println(destId, HEX);
@@ -982,7 +1049,7 @@ void sendRREP(uint8_t destId, uint8_t pathId,
 
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-  LoRa.endPacket();
+  LoRa.endPacket(); txPacketCount++;
 
   // 转发给 PC UI（相位指示器需要看到 RREP 帧）
   Serial.write((uint8_t*)&frame, FRAME_SIZE);
@@ -1081,7 +1148,7 @@ void sendACK(uint8_t destId, uint8_t pathId,
     // 发送 ACK
     LoRa.beginPacket();
     LoRa.write((uint8_t*)&frame, FRAME_SIZE);
-    LoRa.endPacket();
+    LoRa.endPacket(); txPacketCount++;
 
     // 转发原始帧给 PC UI（必需，之后立即开始 polling）
     Serial.write((uint8_t*)&frame, FRAME_SIZE);
