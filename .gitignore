@@ -15,6 +15,11 @@ venv/
 .vscode/
 .idea/
 
+# Log exports
+comm-log-*.txt
+UI/UI/diag-log.txt
+log/diagnostic-*.txt
+
 # OS
 .DS_Store
 Thumbs.db

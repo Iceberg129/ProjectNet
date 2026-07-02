@@ -19,6 +19,22 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 @keyframes panelIn{from{transform:translateX(100%);}to{transform:translateX(0);}}
 @keyframes particle{0%{stroke-dashoffset:100;}100%{stroke-dashoffset:0;}}
 .stat-change{animation:countUp .35s ease-out;}
+.sparkline polyline,.sparkline polygon{transition:all .3s ease;}
+.msg-cell{background:#334155;transition:background .2s ease,transform .2s ease,opacity .2s ease,box-shadow .2s ease;border-radius:1px;cursor:pointer;}
+.msg-cell:hover{box-shadow:0 0 0 2px rgba(255,255,255,.35);z-index:1;transform:scale(1.35);}
+.msg-cell.filling{transform:translateX(5px);opacity:0;}
+.msg-cell.done{transform:translateX(0);opacity:1;}
+.msg-cell.pinned{outline:2px solid #fff;outline-offset:-1px;z-index:2;}
+.msg-grid-inner{will-change:transform;width:100%;height:100%;}
+.msg-popup{position:fixed;z-index:999;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:8px 14px;font-size:12px;color:#f1f5f9;pointer-events:auto;opacity:0;transform:translateY(6px);transition:opacity .2s ease,transform .2s ease;box-shadow:0 8px 24px rgba(0,0,0,.7);white-space:nowrap;}
+.msg-popup.show{opacity:1;transform:translateY(0);}
+.msg-popup::after{content:'';position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:6px solid #475569;}
+.msg-popup.below::after{bottom:auto;top:-6px;border-top:none;border-bottom:6px solid #475569;}
+.spark-tip{position:fixed;z-index:998;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:6px 12px;font-size:12px;color:#f1f5f9;pointer-events:none;opacity:0;transition:opacity .15s ease;box-shadow:0 4px 16px rgba(0,0,0,.6);white-space:nowrap;}
+.spark-tip.show{opacity:1;}
+.spark-svg,.spark-svg *{cursor:none!important;}
+.toast{position:fixed;top:16px;right:16px;z-index:1000;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;color:#fff;opacity:0;transform:translateX(40px);transition:opacity .3s ease,transform .3s ease;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,.5);}
+.toast.show{opacity:1;transform:translateX(0);}
 .btn-trans{transition:all .2s ease;}
 .btn-trans:hover{transform:translateY(-1px);}
 .custom-scroll::-webkit-scrollbar{width:4px;}
@@ -43,6 +59,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
       <p class="text-xs" style="color:var(--mut);">LoRa AODV-Lite · Real-time Topology &amp; RSSI Monitoring &nbsp;|&nbsp; <span style="color:#f97316;">第21队</span> &nbsp;<span style="color:#e2e8f0;">黄鹏峻 · 吴汉鹏 · 林金鑫 · 贾笛</span></p>
     </div>
   </div>
+  <span class="text-base font-mono font-bold tracking-widest" style="color:#22d3ee;" id="header-channel">530MHz SF7</span>
   <div class="flex items-center gap-2.5">
     <select id="port-select" class="text-sm rounded-md px-2 py-1.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);"><option value="">加载端口...</option></select>
     <button onclick="fetchPorts()" title="刷新串口列表" class="btn-trans text-sm px-2 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">🔄</button>
@@ -52,17 +69,16 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
     <div class="w-px h-5" style="background:var(--brd);"></div>
     <button onclick="showChannelPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">⚙️ 信道</button>
     <button onclick="showWhitelistPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📋 白名单</button>
-    <button id="btn-reset" onclick="resetAll()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:#ef4444;">🗑️ 清除</button>
+    <button id="btn-reset" onclick="resetAll()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:#ef4444;">↺ 重置</button>
     <button onclick="exportLogs()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📥 导出日志</button>
     <div class="w-px h-5" style="background:var(--brd);"></div>
     <div id="ws-dot" class="w-2.5 h-2.5 rounded-full" style="background:var(--red);box-shadow:0 0 8px var(--red);"></div>
-    <span id="ws-label" class="text-xs font-mono" style="color:var(--mut);">离线</span>
+    <span id="ws-label" class="text-xs font-mono" style="color:var(--red);">后端</span>
   </div>
 </header>
 
 <!-- ════════════ STATS BAR ════════════ -->
 <div id="stats-bar" class="flex gap-3 px-5 py-2 flex-shrink-0 overflow-x-auto no-scrollbar" style="background:var(--bg);border-bottom:1px solid var(--brd);"></div>
-
 <!-- ════════════ MAIN ════════════ -->
 <main class="flex flex-1 overflow-hidden relative">
   <!-- 左：拓扑图 -->
@@ -232,23 +248,27 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
 // ════════════════════ 常量 ════════════════════
 const MSG_RREQ=0x10,MSG_RREP=0x11,MSG_DATA=0x01,MSG_ACK=0x02,MSG_HB=0x03,MSG_CMD=0x04,MSG_CMD_ACK=0x05,MSG_ACK_CONFIRM=0x06,MSG_KICK=0x08,MSG_UNKICK=0x09,MSG_JOIN=0x20,MSG_JOIN_OK=0x21,MSG_JOIN_NO=0x22,MSG_PREPARE=0x0A,MSG_READY=0x0B,MSG_COMMIT=0x0C,MSG_NODE_STATUS=0x07;
 const MSG_META={
+  // 核心通信周期
   [MSG_RREQ]:['RREQ','路由发现','#f97316'],
-  [MSG_RREP]:['RREP','路由应答','#22d3ee'],
+  [MSG_RREP]:['RREP','路由应答','#06b6d4'],
   [MSG_DATA]:['DATA','数据传输','#22c55e'],
   [MSG_ACK]:['ACK','确认应答','#eab308'],
+  [MSG_ACK_CONFIRM]:['ACK_CFM','确认回执','#14b8a6'],
   [MSG_HB]:['HB','心跳保活','#8b5cf6'],
-  [MSG_CMD]:['CMD','下行命令','#f59e0b'],
-  [MSG_CMD_ACK]:['CMD_OK','命令应答','#10b981'],
-  [MSG_ACK_CONFIRM]:['ACK_CFM','ACK确认回执','#10b981'],
-  [MSG_KICK]:['KICK','踢出命令','#ef4444'],
-  [MSG_UNKICK]:['UNKICK','恢复命令','#22c55e'],
-  [MSG_JOIN]:['JOIN','入网请求','#ec4899'],
-  [MSG_JOIN_OK]:['JOIN_OK','入网允许','#22c55e'],
-  [MSG_JOIN_NO]:['JOIN_NO','入网拒绝','#ef4444'],
+  // 两阶段提交
   [MSG_PREPARE]:['PREPARE','信道准备','#0ea5e9'],
-  [MSG_READY]:['READY','信道就绪','#22d3ee'],
+  [MSG_READY]:['READY','信道就绪','#38bdf8'],
   [MSG_COMMIT]:['COMMIT','信道切换','#a78bfa'],
-  [MSG_NODE_STATUS]:['STATUS','节点状态','#22c55e'],
+  // 管理指令
+  [MSG_CMD]:['CMD','下行命令','#f59e0b'],
+  [MSG_CMD_ACK]:['CMD_ACK','命令应答','#10b981'],
+  [MSG_KICK]:['KICK','踢出命令','#ef4444'],
+  [MSG_UNKICK]:['UNKICK','恢复命令','#84cc16'],
+  [MSG_NODE_STATUS]:['STATUS','节点状态','#3b82f6'],
+  // 入网流程
+  [MSG_JOIN]:['JOIN','入网请求','#ec4899'],
+  [MSG_JOIN_OK]:['JOIN_OK','入网允许','#4ade80'],
+  [MSG_JOIN_NO]:['JOIN_NO','入网拒绝','#dc2626'],
 };
 const NODE_META={
   0x10:{role:'主节点',en:'mainTerm',color:'#f97316',size:60,cat:0},
@@ -466,80 +486,630 @@ function toggleRssiPanel(){
 }
 
 // ════════════════════ 统计仪表盘 ════════════════════
+//   卡片顺序：左=网络状态 → 右=性能历史
 const STAT_CARDS=[
-  {key:'totalFrames',label:'总帧数',icon:'📊',color:'#3b82f6'},
-  {key:'rreqCount',label:'RREQ',icon:'🔍',color:'#f97316'},
-  {key:'rrepCount',label:'RREP',icon:'📬',color:'#22d3ee'},
-  {key:'dataCount',label:'DATA',icon:'📦',color:'#22c55e'},
-  {key:'ackCount',label:'ACK',icon:'✅',color:'#eab308'},
-  {key:'successRate',label:'成功率',icon:'🎯',color:'#22c55e',suffix:'%'},
-  {key:'avgRssi',label:'平均RSSI',icon:'📶',color:'#a78bfa',suffix:' dBm',rssi:true},
+  {key:'onlineNodes', totalKey:'totalNodes', label:'在线节点', icon:'🟢', color:'#22c55e', type:'fraction', sparkline:'onlineCount', desc:'当前在线节点数量'},
+  {key:'activeLinks', label:'活跃链路', icon:'🔗', color:'#22d3ee',                    sparkline:'activeLinks', desc:'当前活跃的无线链路数'},
+  {key:'msgTypeHistory',label:'消息流', icon:'📨', color:'#8b5cf6', type:'msgGrid'},
+  {key:'successRate', label:'成功率',   icon:'🎯', color:'#22c55e', suffix:'%',        sparkline:'successRate', desc:'通信周期成功率'},
+  {key:'avgRssi',     label:'网络RSSI', icon:'📶', color:'#a78bfa', suffix:' dBm', rssi:true, sparkline:'avgRssi', desc:'全网平均信号强度'},
+  {key:'upRate', downKey:'downRate', label:'主节点速率', icon:'📡', color:'#22d3ee', suffix:' B/s', type:'duplex', sparklineUp:'upRate', sparklineDown:'downRate', desc:'主节点上下行通信速率'},
 ];
+const PHASE_NAMES={
+  'idle':'空闲 ⏸','rreq':'路由发现 🔍','rrep':'路由应答 📬',
+  'data':'数据传输 📦','ack':'确认应答 ✅',
+  'rrep_fail':'路由超时 ❌','ack_fail':'确认超时 ❌',
+  'data_fail':'传输失败 ❌','rreq_fail':'发现失败 ❌',
+};
 let lastStats={};
+// ★ 迷你走势图历史（每卡保留最近 30 个采样点 ≈ 30 秒）
+const SPARK_MAX = 30;
+let sparkHistory = {};  // { key: [{v, t}] }
+// ★ 走势图使用 viewBox，SVG 自适应宽度
+const SPARK_VB = '0 0 120 32';
+const SPARK_PAD = 3, VB_W = 120, VB_H = 32;
+const _SPARK_SLOT = (VB_W-2*SPARK_PAD)/(SPARK_MAX-1);  // 每个采样点占的 x 宽度
+
+function _sparkCoords(points, fixedRange){
+  const N=points.length, maxN=SPARK_MAX;
+  const xs=points.map((_,i)=>Math.round(SPARK_PAD+((maxN-N)+i)*_SPARK_SLOT));
+  const vals=points.map(p=>p.v);
+  let min=Math.min(...vals), max=Math.max(...vals);
+  if(fixedRange){min=Math.min(min,fixedRange[0]);max=Math.max(max,fixedRange[1]);}
+  if(min===max){min-=0.5;max+=0.5;}
+  const h=VB_H-2*SPARK_PAD;
+  const ys=vals.map(v=>Math.round(SPARK_PAD+h-(v-min)/(max-min)*h));
+  return {xs,ys};
+}
+function _sparkPoints(points, fixedRange){
+  const {xs,ys}=_sparkCoords(points,fixedRange);
+  return points.map((_,i)=>`${xs[i]},${ys[i]}`).join(' ');
+}
+
+function _setupSparkSVG(svg,color){
+  if(svg._sparkReady)return;
+  svg.innerHTML=`<rect class="spark-overlay" x="0" y="0" width="120" height="32" fill="transparent"/>
+    <line class="spark-vline" x1="0" y1="0" x2="0" y2="32" stroke="#64748b" stroke-width="0.5" stroke-dasharray="2,2" style="display:none"/>
+    <circle class="spark-dot" cx="0" cy="0" r="2.5" fill="${color}" stroke="#fff" stroke-width="1" style="display:none"/>
+    <polyline class="spark-line" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+  const rect=svg.querySelector('.spark-overlay');
+  if(rect){
+    rect.addEventListener('mousemove',e=>{const d=svg._sparkData;if(d)_sparkHover(e,svg,d.xs,d.ys,d.color);});
+    rect.addEventListener('mouseleave',()=>_sparkLeave(svg));
+  }
+  svg._sparkReady=true;
+}
+function drawSparkline(svg, points, color, fixedRange,title,desc,unit){
+  if(!svg||points.length<2){svg.innerHTML='';svg._sparkReady=false;return;}
+  _setupSparkSVG(svg,color);
+  const {xs,ys}=_sparkCoords(points,fixedRange);
+  const pts=points.map((_,i)=>`${xs[i]},${ys[i]}`).join(' ');
+  const poly=svg.querySelector('.spark-line');
+  if(poly)poly.setAttribute('points',pts);
+  const dot=svg.querySelector('.spark-dot');
+  if(dot){dot.setAttribute('fill',color);dot.setAttribute('stroke',color);}
+  svg._sparkData={xs,ys,points,color,label:desc||'',extra:title||'',unit:unit||''};
+}
+function _setupDuplexSVG(svg,upColor,downColor){
+  if(svg._sparkReady)return;
+  svg.innerHTML=`<rect class="spark-overlay" x="0" y="0" width="120" height="32" fill="transparent"/>
+    <line class="spark-vline" x1="0" y1="0" x2="0" y2="32" stroke="#64748b" stroke-width="0.5" stroke-dasharray="2,2" style="display:none"/>
+    <circle class="spark-dot-up" cx="0" cy="0" r="2.5" fill="${upColor}" stroke="#fff" stroke-width="1" style="display:none"/>
+    <circle class="spark-dot-down" cx="0" cy="0" r="2.5" fill="${downColor}" stroke="#fff" stroke-width="1" style="display:none"/>
+    <polyline class="spark-line-up" fill="none" stroke="${upColor}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    <polyline class="spark-line-down" fill="none" stroke="${downColor}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+  const rect=svg.querySelector('.spark-overlay');
+  if(rect){
+    rect.addEventListener('mousemove',e=>_sparkHoverDuplex(e,svg));
+    rect.addEventListener('mouseleave',()=>_sparkLeave(svg));
+  }
+  svg._sparkReady=true;
+}
+function drawDuplexSparkline(svg, upPoints, downPoints, upColor, downColor,title,desc,unit){
+  if(!svg){svg.innerHTML='';svg._sparkReady=false;return;}
+  const hasUp=upPoints&&upPoints.length>1, hasDown=downPoints&&downPoints.length>1;
+  if(!hasUp&&!hasDown){svg.innerHTML='';svg._sparkReady=false;return;}
+  _setupDuplexSVG(svg,upColor,downColor);
+  const now=Date.now(), tMax=now, tMin=now-SPARK_MAX*1000, tRange=tMax-tMin||1;
+  const tx=t=>(t-tMin)/tRange*(VB_W-2*SPARK_PAD)+SPARK_PAD;
+  const allVals=[];
+  if(hasDown)downPoints.forEach(p=>{allVals.push(p.v);});
+  if(hasUp)upPoints.forEach(p=>{allVals.push(p.v);});
+  let vMin=Math.min(...allVals),vMax=Math.max(...allVals);
+  if(vMin===vMax){vMin-=0.5;vMax+=0.5;}
+  const vh=VB_H-2*SPARK_PAD;
+  const ty=v=>Math.round(SPARK_PAD+vh-(v-vMin)/(vMax-vMin)*vh);
+  // 只更新 polyline 属性
+  const polyUp=svg.querySelector('.spark-line-up');
+  const polyDown=svg.querySelector('.spark-line-down');
+  if(hasDown&&polyDown){polyDown.setAttribute('points',downPoints.map(p=>`${tx(p.t).toFixed(0)},${ty(p.v)}`).join(' '));polyDown.style.display='';}
+  else if(polyDown)polyDown.style.display='none';
+  if(hasUp&&polyUp){polyUp.setAttribute('points',upPoints.map(p=>`${tx(p.t).toFixed(0)},${ty(p.v)}`).join(' '));polyUp.style.display='';}
+  else if(polyUp)polyUp.style.display='none';
+  // 缓存数据
+  svg._sparkData={duplex:true,upColor,downColor,hasUp,hasDown,upPoints,downPoints,tx,ty,label:desc||'',extra:title||'',unit:unit||''};
+}
+// ★ 消息类型 → 颜色映射
+const MSG_COLORS={
+  [MSG_RREQ]:'#f97316',[MSG_RREP]:'#06b6d4',[MSG_DATA]:'#22c55e',[MSG_ACK]:'#eab308',
+  [MSG_ACK_CONFIRM]:'#14b8a6',[MSG_HB]:'#8b5cf6',
+  [MSG_PREPARE]:'#0ea5e9',[MSG_READY]:'#38bdf8',[MSG_COMMIT]:'#a78bfa',
+  [MSG_CMD]:'#f59e0b',[MSG_CMD_ACK]:'#10b981',
+  [MSG_KICK]:'#ef4444',[MSG_UNKICK]:'#84cc16',[MSG_NODE_STATUS]:'#3b82f6',
+  [MSG_JOIN]:'#ec4899',[MSG_JOIN_OK]:'#4ade80',[MSG_JOIN_NO]:'#dc2626',
+};
+
+function pushSpark(key, v){
+  if(!sparkHistory[key])sparkHistory[key]=[];
+  const h=sparkHistory[key];
+  if(v===null||v===undefined)return;
+  // 每秒固定追加一个点（节流在 updateStats 入口，此处不过滤）
+  h.push({v:v,t:Date.now()});
+  if(h.length>SPARK_MAX)h.splice(0,h.length-SPARK_MAX);
+}
+
+// ══════════ msgGrid 状态机（完全自适应） ══════════
+const _MSG_CELL=10, _MSG_GAP=1, _MSG_UNIT=_MSG_CELL+_MSG_GAP;  // 11px 单元
+let _msgGridState = {
+  cells: [],
+  cols: 0,
+  rows: 0,
+  fillPtr: 0,
+  processed: 0,
+  _shifting: false,
+  _grid: null,
+  _busy: false,
+};
+
+function _animateCellFill(cell, color){
+  cell.style.background=color;
+  cell.classList.add('done');
+}
+
+function _renderAllCells(grid, cells){
+  const n=cells.length;
+  for(let i=0;i<n;i++){
+    const obj=cells[i];
+    const cell=grid.children[i];
+    if(!cell)continue;
+    cell.style.transition='none';
+    if(!obj){
+      cell.dataset.filled='0';cell.dataset.clr='';
+      cell.style.background='#334155';
+      cell.style.transform='';cell.style.opacity='';
+      cell.classList.remove('filling','done','pinned');cell.title='';
+    }else{
+      const mt=obj.t||obj;  // 兼容旧数字格式
+      const clr=MSG_COLORS[mt]||'#4b5563';
+      const name=MSG_META[mt]?MSG_META[mt][0]:('0x'+mt.toString(16));
+      cell.dataset.filled='1';cell.dataset.clr=clr;
+      cell.style.background=clr;cell.title=name;
+      cell.style.transform='';cell.style.opacity='';
+      cell.classList.remove('filling','pinned');cell.classList.add('done');
+    }
+    void cell.offsetWidth;cell.style.transition='';
+  }
+  _syncPinnedHighlight();
+}
+
+function _triggerShift(grid){
+  const gs=_msgGridState;
+  if(gs._shifting)return;
+  gs._shifting=true;
+  const total=gs.cells.length, cols=gs.cols, rows=gs.rows;
+  const rowH=grid.scrollHeight/rows||8;
+  grid.style.transition='transform .5s ease';
+  grid.style.transform=`translateY(-${rowH}px)`;
+  const finishShift=()=>{
+    if(!gs._shifting)return;
+    grid.removeEventListener('transitionend',finishShift);
+    grid.style.transition='none';
+    grid.style.transform='';
+    const newPtr=total-cols;
+    for(let i=0;i<newPtr;i++)gs.cells[i]=gs.cells[i+cols];
+    for(let i=newPtr;i<total;i++)gs.cells[i]=null;
+    gs.fillPtr=newPtr;
+    _renderAllCells(grid,gs.cells);
+    gs._shifting=false;
+  };
+  grid.addEventListener('transitionend',finishShift,{once:true});
+  setTimeout(()=>{if(gs._shifting)finishShift();},550);
+}
+
+// ★ 填格链：逐个填入消息，遇到满格自动平移
+function _fillChain(grid, msgList, startIdx){
+  const gs=_msgGridState;
+  const total=gs.cells.length;
+  if(startIdx>=msgList.length){
+    if(gs._pending&&gs._pending.length>0){
+      const next=gs._pending;gs._pending=null;
+      _fillChain(grid,next,0);
+    }else{
+      gs._busy=false;
+      if(gs.fillPtr>=total&&!gs._shifting)_autoShiftIfFull(grid);
+    }
+    return;
+  }
+  if(gs._shifting){setTimeout(()=>_fillChain(grid,msgList,startIdx),60);return;}
+  if(gs.fillPtr>=total){
+    _triggerShift(grid);
+    setTimeout(()=>_fillChain(grid,msgList,startIdx),60);
+    return;
+  }
+  const obj=msgList[startIdx];
+  const idx=gs.fillPtr;
+  const cell=grid.children[idx];
+  if(!cell){gs._busy=false;return;}
+  const mt=obj.t||obj;  // 兼容旧数字格式
+  const clr=MSG_COLORS[mt]||'#4b5563';
+  const name=MSG_META[mt]?MSG_META[mt][0]:('0x'+mt.toString(16));
+  gs.cells[idx]=obj;
+  cell.dataset.filled='1';
+  cell.dataset.clr=clr;
+  cell.title=name;
+  _animateCellFill(cell,clr);
+  gs.fillPtr++;
+  setTimeout(()=>_fillChain(grid,msgList,startIdx+1),100);
+}
+
+// ★ 满格自动平移（无新消息时触发）
+function _autoShiftIfFull(grid){
+  const gs=_msgGridState;
+  if(gs.fillPtr>=gs.cells.length&&!gs._shifting){
+    _triggerShift(grid);
+  }
+}
+
+// ★ 消息流格子悬停弹窗 + 点击固定 + 跳转日志
+let _popupPinned=false,_popupCell=null,_pinnedSeq=null,_popupTimer=null,_popupPending=null;
+function _syncPinnedHighlight(){
+  if(!_popupPinned||_pinnedSeq==null)return;
+  const gs=_msgGridState, cells=gs.cells;
+  const grid=gs._grid;if(!grid)return;
+  // 清除所有旧高亮
+  for(let i=0;i<grid.children.length;i++)grid.children[i].classList.remove('pinned');
+  // 查找匹配的 seq 并高亮 + 刷新弹窗
+  for(let i=0;i<cells.length;i++){
+    if(cells[i]&&cells[i].seq===_pinnedSeq){
+      const cell=grid.children[i];
+      if(cell){cell.classList.add('pinned');_popupCell=cell;_showPopup(cell);}
+      return;
+    }
+  }
+  // 没找到 → 已移出视野，取消固定
+  _popupPinned=false;_pinnedSeq=null;_popupCell=null;
+  const p=document.getElementById('msg-popup');if(p)p.classList.remove('show');
+}
+function _showPopup(cell){
+  const grid=cell.parentElement;
+  if(!grid||!grid.classList.contains('msg-grid-inner'))return;
+  const idx=Array.prototype.indexOf.call(grid.children,cell);
+  const obj=_msgGridState.cells[idx];
+  const popup=document.getElementById('msg-popup');
+  if(!obj||!popup)return;
+  const mt=obj.t||obj;
+  const meta=MSG_META[mt]||['UNKN','未知','#6b7280'];
+  const clr=MSG_COLORS[mt]||'#4b5563';
+  const ts=obj.ts?new Date(obj.ts*1000).toLocaleTimeString('zh-CN',{hour12:false}):'--:--:--';
+  const src=obj.s!=null?'0x'+obj.s.toString(16).toUpperCase():'?';
+  const dst=obj.d!=null?'0x'+obj.d.toString(16).toUpperCase():'?';
+  popup.innerHTML='<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+clr+';margin-right:8px;vertical-align:middle;"></span><b style="font-size:13px;">'+meta[0]+'</b> <span style="color:#94a3b8;">'+meta[1]+'</span>'+
+    '<div style="margin-top:4px;font-size:11px;color:#94a3b8;">'+
+    '<span>🕐 '+ts+'</span> &nbsp; '+
+    '<span>📤 '+src+' ➔ '+dst+'</span> &nbsp; '+
+    '<span>#'+(idx+1)+' · 0x'+mt.toString(16).toUpperCase().padStart(2,'0')+'</span></div>'+
+    (obj.seq?'<div style="margin-top:4px;"><button onclick="event.stopPropagation();_jumpToLog('+obj.seq+',\''+clr+'\')" style="background:#334155;border:1px solid #475569;color:#22d3ee;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;">📍 跳转日志</button></div>':'');
+  _popupCell=cell;
+  // 定位：根据格子所在行决定弹窗方向
+  const r=cell.getBoundingClientRect();
+  const cols=_msgGridState.cols, rows=_msgGridState.rows;
+  const row=cols>0?Math.floor(idx/cols):0;
+  const popupH=popup.offsetHeight||60;
+  const above=r.top-popupH-8;
+  // 首行 → 下方；末行 → 上方；其余按空间判断
+  if(row===0||above<20){
+    popup.style.top=(r.bottom+8)+'px';
+    popup.style.transform='translate(-50%,0)';
+    popup.classList.add('below');
+  }else{
+    popup.style.top=(r.top-8)+'px';
+    popup.style.transform='translate(-50%,-100%)';
+    popup.classList.remove('below');
+  }
+  popup.style.left=(r.left+r.width/2)+'px';
+  popup.classList.add('show');
+}
+function _hidePopup(){const p=document.getElementById('msg-popup');if(p&&!_popupPinned){p.classList.remove('show');_popupCell=null;}}
+// 悬停：180ms 防抖，避免掠过时切换
+document.addEventListener('mouseover',function(e){
+  const cell=e.target.closest('.msg-cell');
+  if(!cell||cell===_popupCell||_popupPinned)return;
+  clearTimeout(_popupTimer);clearTimeout(_popupPending);
+  _popupPending=setTimeout(function(){_showPopup(cell);_popupPending=null;},180);
+});
+document.addEventListener('mouseout',function(e){
+  const cell=e.target.closest('.msg-cell');
+  if(cell){clearTimeout(_popupPending);_popupPending=null;}
+  if(cell&&!_popupPinned){_popupTimer=setTimeout(_hidePopup,600);}
+});
+// 鼠标移入弹窗 → 保持显示
+const _popupEl=document.getElementById('msg-popup');
+if(_popupEl){
+  _popupEl.addEventListener('mouseenter',function(){clearTimeout(_popupTimer);clearTimeout(_popupPending);});
+  _popupEl.addEventListener('mouseleave',function(){if(!_popupPinned)_popupTimer=setTimeout(_hidePopup,300);});
+}
+// 点击格子 → 固定/取消
+document.addEventListener('click',function(e){
+  const cell=e.target.closest('.msg-cell');
+  const popup=document.getElementById('msg-popup');
+  if(!popup)return;
+  if(cell){
+    const grid=cell.parentElement;
+    const idx=grid?Array.prototype.indexOf.call(grid.children,cell):-1;
+    const obj=idx>=0?_msgGridState.cells[idx]:null;
+    if(!obj)return;
+    // 已固定同一格 → 取消
+    if(_popupPinned&&_pinnedSeq===obj.seq){_popupPinned=false;_pinnedSeq=null;if(_popupCell)_popupCell.classList.remove('pinned');popup.classList.remove('show');_popupCell=null;return;}
+    // 清除旧高亮（遍历所有格子，确保只有一个 pinned）
+    const allCells=grid.querySelectorAll('.msg-cell');
+    allCells.forEach(c=>c.classList.remove('pinned'));
+    // 固定新格：总是刷新弹窗内容和 _popupCell
+    _popupPinned=true;_pinnedSeq=obj.seq||null;cell.classList.add('pinned');
+    clearTimeout(_popupTimer);clearTimeout(_popupPending);
+    _showPopup(cell);  // ★ 总是调用，确保弹窗内容 + _popupCell 更新
+    return;
+  }
+  if(!e.target.closest('#msg-popup')){_popupPinned=false;_pinnedSeq=null;document.querySelectorAll('.msg-cell.pinned').forEach(c=>c.classList.remove('pinned'));popup.classList.remove('show');_popupCell=null;}
+});
+// Esc 取消固定
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){_popupPinned=false;_pinnedSeq=null;if(_popupCell)_popupCell.classList.remove('pinned');_hidePopup();}});
+
+// ★ 走势图十字准线交互
+function _sparkHover(e,svg,xs,ys,color){
+  const r=svg.getBoundingClientRect();
+  const mx=(e.clientX-r.left)/r.width*VB_W;
+  const my=(e.clientY-r.top)/r.height*VB_H;
+  // 找最近的数据点（按x距离）
+  let best=0,minD=Infinity;
+  for(let i=0;i<xs.length;i++){const d=Math.abs(xs[i]-mx);if(d<minD){minD=d;best=i;}}
+  const vline=svg.querySelector('.spark-vline');
+  const dot=svg.querySelector('.spark-dot');
+  if(vline){vline.setAttribute('x1',xs[best]);vline.setAttribute('x2',xs[best]);vline.style.display='';}
+  if(dot){dot.setAttribute('cx',xs[best]);dot.setAttribute('cy',ys[best]);dot.style.display='';}
+  // 显示提示框
+  const sd=svg._sparkData||{};
+  const p=sd.points?sd.points[best]:null;
+  const t=p?new Date(p.t).toLocaleTimeString('zh-CN',{hour12:false}):'--:--:--';
+  const title=sd.extra||'',desc=sd.label||'',unit=sd.unit||'';
+  _showSparkTip(e,title,desc,(p?p.v:'?')+unit,t,color||'#94a3b8');
+}
+function _sparkHoverDuplex(e,svg){
+  const r=svg.getBoundingClientRect();
+  const mx=(e.clientX-r.left)/r.width*VB_W;
+  const sd=svg._sparkData||{};
+  if(!sd.duplex)return;
+  // 找最近点（从 up/down 中找 x 坐标最近的）
+  let bestX=mx,bestTime='';
+  const upDot=svg.querySelector('.spark-dot-up');
+  const downDot=svg.querySelector('.spark-dot-down');
+  let upV=null,downV=null;
+  if(sd.hasUp&&sd.upPoints){
+    const upP=_findNearestByTime(sd.upPoints,mx,sd.tx);
+    if(upP&&upDot){const ux=sd.tx(upP.t),uy=sd.ty(upP.v);upDot.setAttribute('cx',ux);upDot.setAttribute('cy',uy);upDot.style.display='';upV=upP.v;bestX=ux;bestTime=new Date(upP.t).toLocaleTimeString('zh-CN',{hour12:false});}
+    else if(upDot)upDot.style.display='none';
+  }else if(upDot)upDot.style.display='none';
+  if(sd.hasDown&&sd.downPoints){
+    const downP=_findNearestByTime(sd.downPoints,mx,sd.tx);
+    if(downP&&downDot){const dx=sd.tx(downP.t),dy=sd.ty(downP.v);downDot.setAttribute('cx',dx);downDot.setAttribute('cy',dy);downDot.style.display='';downV=downP.v;if(!upV){bestX=dx;bestTime=new Date(downP.t).toLocaleTimeString('zh-CN',{hour12:false});}}
+    else if(downDot)downDot.style.display='none';
+  }else if(downDot)downDot.style.display='none';
+  // 竖线
+  const vline=svg.querySelector('.spark-vline');
+  if(vline){vline.setAttribute('x1',bestX);vline.setAttribute('x2',bestX);vline.style.display='';}
+  // 提示框
+  const title=sd.extra||'',desc=sd.label||'',unit=sd.unit||'';
+  const vals=[];
+  if(upV!=null)vals.push(`<span style="color:${sd.upColor};">↑${upV}${unit}</span>`);
+  if(downV!=null)vals.push(`<span style="color:${sd.downColor};">↓${downV}${unit}</span>`);
+  _showSparkTip(e,title,desc,vals.join(' '),bestTime||'--:--:--','#94a3b8');
+}function _findNearestByTime(points,mx,txFn){
+  let best=null,minD=Infinity;
+  for(let i=0;i<points.length;i++){
+    const x=txFn(points[i].t);
+    const d=Math.abs(x-mx);
+    if(d<minD){minD=d;best=points[i];}
+  }
+  return best;
+}
+function _sparkLeave(svg){
+  const vline=svg.querySelector('.spark-vline');
+  const dots=svg.querySelectorAll('[class^="spark-dot"]');
+  if(vline)vline.style.display='none';
+  dots.forEach(d=>d.style.display='none');
+  _hideSparkTip();
+}
+// ★ 提示框（防越界）
+function _showSparkTip(e,title,desc,val,t,color){
+  if(!_sparkTipEl)_sparkTipEl=document.getElementById('spark-tip');
+  if(!_sparkTipEl)return;
+  _sparkTipEl.innerHTML='<div style="font-weight:700;font-size:13px;color:#f1f5f9;margin-bottom:2px;">'+title+'</div>'+
+    '<div style="font-size:10px;color:#64748b;margin-bottom:4px;">'+desc+'</div>'+
+    '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+color+';margin-right:6px;vertical-align:middle;"></span><b>'+val+'</b> <span style="color:#94a3b8;">'+t+'</span>';
+  _sparkTipEl.style.left='';_sparkTipEl.style.top='';_sparkTipEl.classList.add('show');
+  // 定位：优先右上，防越界
+  const tipW=_sparkTipEl.offsetWidth||100, tipH=_sparkTipEl.offsetHeight||24;
+  let left=e.clientX+14, top=e.clientY-tipH-8;
+  if(left+tipW>window.innerWidth-8)left=e.clientX-tipW-14;
+  if(top<8)top=e.clientY+14;
+  _sparkTipEl.style.left=left+'px';
+  _sparkTipEl.style.top=top+'px';
+}
+function _hideSparkTip(){if(_sparkTipEl)_sparkTipEl.classList.remove('show');}
+let _sparkTipEl=null;
+
+// ★ Toast 通知（右上角弹出，3s 自动消失）
+let _toastTimer=null;
+function _showToast(icon,msg,color){
+  const el=document.getElementById('toast');
+  if(!el)return;
+  el.innerHTML=icon+' '+msg;
+  el.style.background=color+'22';el.style.border='1px solid '+color;el.style.color=color;
+  el.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer=setTimeout(()=>el.classList.remove('show'),3500);
+}
+
+// ★ 跳转日志：滚动到对应条目并高亮
+function _jumpToLog(frameSeq,clr){
+  // ★ 确保右侧面板在日志流标签页
+  switchTab('log',document.querySelector('[data-tab=\"log\"]'));
+  const container=document.getElementById('log-container');
+  if(!container)return;
+  const el=container.querySelector('[data-fseq="'+frameSeq+'"]');
+  if(!el){addLog('SYS','跳转','⚠️ 未找到对应日志条目','#eab308');return;}
+  // ★ 只在日志容器内滚动，不影响页面其他区域
+  container.scrollTo({top:el.offsetTop-container.clientHeight/2,behavior:'smooth'});
+  clr=clr||'#22d3ee';
+  el.style.transition='border-color .2s ease,box-shadow .2s ease';
+  el.style.borderColor=clr;el.style.boxShadow='0 0 16px '+clr+'80';
+  setTimeout(function(){el.style.borderColor='#1e293b';el.style.boxShadow='';},2000);
+}
 
 function animateCard(el, idx){
-  // ★ 逐级延迟动画：卡片从左到右依次滑入（50ms 间隔）
   el.style.animationDelay = (idx * 0.05) + 's';
   el.classList.remove('stat-change');
-  void el.offsetWidth;  // 强制重绘，使 animation 重新触发
+  void el.offsetWidth;
   el.classList.add('stat-change');
   setTimeout(() => { el.style.animationDelay = ''; }, idx * 50 + 400);
 }
 
+let _lastStatsUpdate=0;
+// _msgGridState declared above with fill queue functions
 function updateStats(s){
   if(!s)return;
+  // ★ 自动同步串口状态（处理页面刷新后后端仍在运行的情况）
+  if(s.serialRunning===true&&!isSerialOpen&&!_manualClose){
+    isSerialOpen=true;_uiFrozen=false;_manualClose=false;_lastStatsUpdate=0;
+    const btn=document.getElementById('btn-serial');
+    if(btn){btn.innerHTML='⏹ 关闭串口';btn.style.background='#ef4444';}
+    if(!activeNodes['0x10'])activeNodes['0x10']={id:'0x10',name:'主节点\n0x10',cat:0,size:60,color:'#f97316',lastSeen:Date.now(),decId:16};
+    activeLinks['PC-0x10']={source:'PC',target:'0x10',rssi:null,lineColor:'#0ea5e9',lineWidth:3,lineType:'solid',inRoute:false};
+    renderTopo();_wlLoaded=false;
+  }
+  // ★ 首次调用：构建卡片骨架（即使冻结也要执行）
   const bar=document.getElementById('stats-bar');
   if(bar.children.length===0){
     bar.innerHTML=STAT_CARDS.map(c=>{
-      let initVal=c.rssi?'-- dBm':c.suffix==='%'?'0.0%':'0';
-      return`<div class="flex-1 min-w-[110px] rounded-lg px-3 py-2 flex items-center gap-2.5" style="background:var(--card);border:1px solid var(--brd);">
-        <span class="text-xl">${c.icon}</span>
-        <div>
-          <div class="text-[10px] font-semibold uppercase tracking-wide" style="color:var(--mut);">${c.label}</div>
-          <div id="stat-${c.key}" class="text-lg font-bold" style="color:${c.color};">${initVal}</div>
+      let initVal;
+      if(c.type==='fraction') initVal='--/--';
+      else if(c.type==='duplex') initVal='-- B/s';
+      else if(c.type==='msgGrid') initVal='0 帧';
+      else if(c.rssi) initVal='-- dBm';
+      else if(c.suffix) initVal='--'+c.suffix;
+      else initVal='0';
+      const hasSpark=c.sparkline||c.sparklineUp;
+      const svg=hasSpark?`<svg id="spark-${c.key}" viewBox="${SPARK_VB}" class="flex-1 min-w-0 self-stretch spark-svg" style="opacity:0.9;" preserveAspectRatio="none"></svg>`:'';
+      const grid=c.type==='msgGrid'?
+        `<div id="wrap-${c.key}" class="flex-1 self-stretch overflow-hidden ml-2" style="min-width:20px;">
+           <div id="grid-${c.key}" class="msg-grid-inner grid gap-px"></div>
+         </div>`:'';
+      return`<div class="flex-1 min-w-0 rounded-lg px-2 py-1 flex items-center gap-1" style="background:var(--card);border:1px solid var(--brd);">
+        <span class="text-base flex-shrink-0">${c.icon}</span>
+        <div class="flex-shrink-0">
+          <div class="text-[11px] font-bold uppercase tracking-wide" style="color:#94a3b8;">${c.label}</div>
+          <div id="stat-${c.key}" class="text-sm font-bold" style="color:${c.color};white-space:nowrap;">${initVal}</div>
         </div>
+        ${svg}${grid}
       </div>`;
     }).join('');
   }
+  // ★ 只有打开串口后才开始更新数据（节流：每秒最多 1 次）
+  if(_uiFrozen)return;
+  const now=Date.now();
+  if(now-_lastStatsUpdate<950)return;
+  _lastStatsUpdate=now;
   STAT_CARDS.forEach((c, idx)=>{
     const el=document.getElementById('stat-'+c.key);
     if(!el)return;
-    let v=s[c.key];
-    if(c.rssi){
-      // RSSI: 可能为 null，颜色随值变化
+    // ── fraction: "在线数/总数"（总数=白名单+主节点，在线=拓扑中非stale节点） ──
+    if(c.type==='fraction'){
+      const total=(_wlEntries.length||0)+1;  // 白名单节点 + mainTerm(0x10)
+      const online=Object.values(activeNodes).filter(n=>n.id!=='PC'&&!n.stale).length;
+      const txt=total>0?`${online}/${total}`:'--/--';
+      if(el.textContent!==txt){
+        el.textContent=txt;
+        el.style.color=online===total?'#22c55e':online>0?'#eab308':'#ef4444';
+        const oldOnline=lastStats[c.key]??-1;
+        if(oldOnline!==online)animateCard(el, idx);
+      }
+      if(c.sparkline){pushSpark(c.sparkline,online);drawSparkline(document.getElementById('spark-'+c.key),sparkHistory[c.sparkline],c.color,null,c.label,c.desc||'',c.suffix||'');}
+    }
+    // ── duplex: 上传/下载速率（双色走势图 + 数字颜色对应） ──
+    else if(c.type==='duplex'){
+      const up=s[c.key]??0, down=s[c.downKey]??0;
+      const upColor='#0ea5e9', downColor='#22c55e';
+      el.innerHTML=`<span style="color:${upColor};">↑${up}</span> <span style="color:${downColor};">↓${down}</span> <span style="color:#94a3b8;">B/s</span>`;
+      const old=lastStats[c.key]??-1;
+      if(old!==up)animateCard(el, idx);
+      if(c.sparklineUp){pushSpark(c.sparklineUp,up);}
+      if(c.sparklineDown){pushSpark(c.sparklineDown,down);}
+      drawDuplexSparkline(document.getElementById('spark-'+c.key),
+        sparkHistory[c.sparklineUp],sparkHistory[c.sparklineDown],upColor,downColor,c.label,c.desc||'',c.suffix||'');
+    }
+    // msgGrid
+	    else if(c.type==='msgGrid'){
+	      const history=s[c.key]||[];
+	      const grid=document.getElementById('grid-'+c.key);
+	      if(!grid)return;
+	      const wrapper=grid.parentElement;
+	      const wW=wrapper.clientWidth, wH=wrapper.clientHeight;
+	      const cols=Math.max(2,Math.floor((wW+_MSG_GAP)/_MSG_UNIT));
+	      const rows=Math.max(2,Math.floor((wH+_MSG_GAP)/_MSG_UNIT));
+	      const total=cols*rows;
+	      if(grid.children.length===0||grid.children.length!==total){
+	        grid.style.gridTemplateColumns=`repeat(${cols},${_MSG_CELL}px)`;
+	        grid.style.gridTemplateRows=`repeat(${rows},${_MSG_CELL}px)`;
+	        while(grid.firstChild)grid.removeChild(grid.firstChild);
+	        for(let i=0;i<total;i++){
+	          const cell=document.createElement('span');
+	          cell.className='msg-cell';
+	          grid.appendChild(cell);
+	        }
+	        const gs=_msgGridState;
+	        gs.cells=new Array(total).fill(null);
+	        gs.cols=cols;gs.rows=rows;
+	        gs._busy=false;gs._pending=null;
+	        gs._grid=grid;
+	        // ★ 即时批量填入最近历史（无动画），避免 resize 后逐个重填
+	        if(history.length>0){
+	          const n=Math.min(history.length,total);
+	          const start=history.length-n;
+	          for(let i=0;i<n;i++)gs.cells[i]=history[start+i];
+	          gs.fillPtr=n;
+	          gs.processed=history.length;
+	          _renderAllCells(grid,gs.cells);
+	        }else{
+	          gs.fillPtr=0;gs.processed=0;
+	        }
+	        return;
+	      }
+	      const gs=_msgGridState;
+	      gs._grid=grid;
+	      const newMsgs=history.slice(gs.processed);
+	      if(newMsgs.length>0){
+	        gs.processed=history.length;
+	        if(!gs._busy){gs._busy=true;_fillChain(grid,newMsgs,0);}
+	        else{gs._pending=(gs._pending||[]).concat(newMsgs);}
+	      }else if(gs.fillPtr>=gs.cells.length&&!gs._shifting&&!gs._busy){
+	        _autoShiftIfFull(grid);
+	      }
+	      // ★ 更新消息流帧数
+	      const cntEl=document.getElementById('stat-'+c.key);
+	      if(cntEl)cntEl.textContent=history.length+' 帧';
+	    }
+    
+// ── RSSI ──
+    else if(c.rssi){
+      let v=s[c.key];
       if(v===null||v===undefined){
-        if(lastStats[c.key]===null)return; // 无变化
+        if(lastStats[c.key]===null)return;
         el.textContent='-- dBm';el.style.color=c.color;
         animateCard(el, idx);
       }else{
         const old=lastStats[c.key];
         if(old!==v){
           el.textContent=v+' dBm';
-          const rc=rssiColor(v);
-          el.style.color=rc;
+          el.style.color=rssiColor(v);
           animateCard(el, idx);
-        }else return;
-      }
-    }else{
-      const old=lastStats[c.key]??-1;
-      if(c.suffix==='%'){
-        // 成功率：null 表示尚无尝试，颜色随值变化
-        if(v===null||v===undefined){
-          if(lastStats[c.key]===null)return;
-          el.textContent='--%';el.style.color=c.color;
-          animateCard(el, idx);
-        }else{
-          if(old!==v){
-            el.textContent=v.toFixed(1)+'%';
-            el.style.color=v>=80?'#22c55e':v>=50?'#eab308':'#ef4444';
-            animateCard(el, idx);
-          }else return;
         }
-      }else{
-        v=v??0;
-        let t=String(v);
-        if(old!==v){el.textContent=t;animateCard(el, idx);}
       }
+      if(c.sparkline){pushSpark(c.sparkline,v);drawSparkline(document.getElementById('spark-'+c.key),sparkHistory[c.sparkline],c.color,[-90,-30],c.label,c.desc||'',c.suffix||'');}
+    }
+    // ── 百分比 ──
+    else if(c.suffix==='%'){
+      let v=s[c.key];
+      if(v===null||v===undefined){
+        if(lastStats[c.key]===null)return;
+        el.textContent='--%';el.style.color=c.color;
+        animateCard(el, idx);
+      }else{
+        const old=lastStats[c.key]??-1;
+        if(old!==v){
+          el.textContent=v.toFixed(1)+'%';
+          el.style.color=v>=80?'#22c55e':v>=50?'#eab308':'#ef4444';
+          animateCard(el, idx);
+        }
+      }
+      if(c.sparkline){pushSpark(c.sparkline,v);drawSparkline(document.getElementById('spark-'+c.key),sparkHistory[c.sparkline],c.color,[0,100],c.label,c.desc||'',c.suffix||'');}
+    }
+    // ── 普通数字 ──
+    else{
+      let v=s[c.key]??0;
+      const old=lastStats[c.key]??-1;
+      const suffix=c.suffix||'';
+      if(old!==v){el.textContent=String(v)+suffix;animateCard(el, idx);}
+      // ★ 活跃链路：卡片 title 显示详情，走势图弹窗显示简述
+      if(c.sparkline){pushSpark(c.sparkline,v);drawSparkline(document.getElementById('spark-'+c.key),sparkHistory[c.sparkline],c.color,null,c.label,c.desc||'',c.suffix||'');}
     }
   });
   lastStats={...s};
@@ -788,8 +1358,6 @@ function renderNodeDetail(nodeHex){
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">空闲内存</div><div class="font-mono text-sm" style="color:${nodeStatuses[nodeHex].freeRAM>500?'#22c55e':nodeStatuses[nodeHex].freeRAM>200?'#eab308':'#ef4444'};">${nodeStatuses[nodeHex].freeRAM} B</div></div>
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">发送包数</div><div class="font-mono text-sm" style="color:#a78bfa;">${nodeStatuses[nodeHex].txPkts}</div></div>
       <div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">接收包数</div><div class="font-mono text-sm" style="color:#22d3ee;">${nodeStatuses[nodeHex].rxPkts}</div></div>
-      ${nodeStatuses[nodeHex].freq?`<div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">当前频率</div><div class="font-mono text-sm">${nodeStatuses[nodeHex].freq}MHz</div></div>`:''}
-      ${nodeStatuses[nodeHex].sf?`<div class="rounded p-2" style="background:var(--bg);"><div class="text-[10px]" style="color:var(--mut);">扩频因子</div><div class="font-mono text-sm">SF${nodeStatuses[nodeHex].sf}</div></div>`:''}
     </div>
     <div class="text-[10px] mt-1" style="color:var(--mut);">状态更新: ${((Date.now()-nodeStatuses[nodeHex].updated)/1000).toFixed(0)}s 前</div>
     `:nodeHex!=='PC'?'<div class="text-xs mt-2 rounded p-2 text-center" style="background:var(--bg);color:var(--mut);">⏳ 等待节点状态数据...<br/><span class="text-[10px]">节点每15s自动上报</span></div>':''}
@@ -855,8 +1423,8 @@ let logSeq=0, lastLogSeq=-1;
 const LOG_CASCADE=10;       // 最多逐级动画的条目数
 const LOG_CASCADE_MS=45;    // 每级延迟 (ms)
 
-function addLog(type,title,detail,color){
-  logEntries.unshift({type,title,detail,color,time:Date.now(),seq:logSeq++});
+function addLog(type,title,detail,color,frameSeq){
+  logEntries.unshift({type,title,detail,color,time:Date.now(),seq:logSeq++,frameSeq:frameSeq||null});
   if(logEntries.length>300)logEntries.length=300;
   renderLogs();
 }
@@ -870,8 +1438,8 @@ function renderLogs(){
   if(lastLogSeq<0){
     c.innerHTML=visible.map((e,i)=>{
       const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
-      return`<div class="rounded p-2 border" style="background:var(--bg);border-color:var(--brd);animation:none">
-        <div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-600 text-[9px]">${t}</span></div>
+      return`<div class="rounded p-2 border" data-fseq="${e.frameSeq||''}" style="background:var(--bg);border-color:var(--brd);animation:none">
+        <div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-500 text-[11px]">${t}</span></div>
         <div class="leading-relaxed text-[11px]">${e.detail}</div></div>`;
     }).join('');
     if(visible.length>0)lastLogSeq=visible[0].seq;
@@ -891,11 +1459,12 @@ function renderLogs(){
   fresh.forEach((e,i)=>{
     const div=document.createElement('div');
     div.className='rounded p-2 border';
+    if(e.frameSeq)div.dataset.fseq=e.frameSeq;
     div.style.background='var(--bg)';
     div.style.borderColor='var(--brd)';
     div.style.animation=`logIn .35s ease-out ${(i*LOG_CASCADE_MS/1000).toFixed(2)}s both`;
     const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
-    div.innerHTML=`<div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-600 text-[9px]">${t}</span></div><div class="leading-relaxed text-[11px]">${e.detail}</div>`;
+    div.innerHTML=`<div class="flex justify-between items-center mb-0.5"><span class="font-bold text-[11px]" style="color:${e.color};">[${e.title}]</span><span class="text-gray-500 text-[11px]">${t}</span></div><div class="leading-relaxed text-[11px]">${e.detail}</div>`;
     frag.appendChild(div);
   });
 
@@ -916,25 +1485,84 @@ function setLogFilter(f,btn){
   renderLogs();
 }
 
-// ★ 导出日志
-function exportLogs(){
-  const all=logEntries.slice(0).reverse();  // 时间正序
-  let text='═══ 通信系统日志导出 ═══\n';
-  text+='导出时间: '+new Date().toLocaleString('zh-CN')+'\n';
-  text+='当前信道: '+currentFreq+'MHz SF'+currentSf+'\n';
-  text+='总条目: '+logEntries.length+'\n';
-  text+='════════════════════════════════════\n\n';
+// ★ 导出日志（增强版：含完整网络状态快照）
+async function exportLogs(){
+  const all=logEntries.slice(0).reverse();
+  const gs=_msgGridState;
+  let text='═══════════════════════════════════════\n';
+  text+='  通信系统综合诊断报告\n';
+  text+='  导出: '+new Date().toLocaleString('zh-CN')+'\n';
+  text+='═══════════════════════════════════════\n\n';
+
+  text+='── 信道 ──\n';
+  text+='  当前: '+currentFreq+'MHz SF'+currentSf+'\n';
+  text+='  串口: '+(isSerialOpen?'已打开':'已关闭')+'  后端: '+(lastStats.serialRunning?'运行中':'未运行')+'\n\n';
+
+  text+='── 统计概览 ──\n';
+  const ls=lastStats;
+  text+='  总帧数: '+(ls.totalFrames||0)+'  RREQ: '+(ls.rreqCount||0)+'  RREP: '+(ls.rrepCount||0)+'  DATA: '+(ls.dataCount||0)+'  ACK: '+(ls.ackCount||0)+'  坏帧: '+(ls.badFrames||0)+'\n';
+  text+='  成功率: '+(ls.successRate!=null?ls.successRate+'%':'--')+'  平均RSSI: '+(ls.avgRssi!=null?ls.avgRssi+' dBm':'--')+'\n';
+  text+='  速率: ↑'+(ls.upRate||0)+' ↓'+(ls.downRate||0)+' B/s\n';
+  text+='  活跃链路: '+Object.keys(activeLinks).length+'  在线节点: '+(ls.onlineNodes||'?')+'/'+(ls.totalNodes||'?')+'\n';
+  text+='  通信阶段: '+(ls.currentPhase||'idle')+'  当前路由: '+(currentRoute||'无')+'\n\n';
+
+  text+='── 拓扑节点 ──\n';
+  const nodes=Object.values(activeNodes);
+  nodes.forEach(n=>{
+    const role=n.id==='PC'?'网关':(NODE_META[n.decId]?NODE_META[n.decId].role:'节点');
+    const status=n.stale?' ⚠离线':' ✅在线';
+    const seen=n.lastSeen?Math.round((Date.now()-n.lastSeen)/1000)+'s前':'--';
+    text+=`  ${n.id} [${role}]${status}  最后活跃: ${seen}\n`;
+  });
+
+  text+='\n── 活跃链路详情 ──\n';
+  const lkKeys=Object.keys(activeLinks);
+  if(lkKeys.length>0){
+    lkKeys.forEach(lk=>{
+      const l=activeLinks[lk];const r=l.rssi!=null?l.rssi+' dBm':'--';
+      text+=`  ${lk}  RSSI: ${r}  ${l.broken?'⚠断开 ':''}${l.inRoute?'★路由 ':''}${l.lineType==='dashed'?'(闲置)':'(活跃)'}\n`;
+    });
+  }else{text+='  (无)\n';}
+
+  text+='\n── 白名单 ──\n';
+  text+='  节点数: '+_wlEntries.length+'\n';
+  _wlEntries.forEach(e=>{
+    text+=`  0x${e.nodeId.toString(16).toUpperCase()}  role=${e.role==='1'?'relay':'sender'}${e.kicked?' ⛔已踢出':''}\n`;
+  });
+
+  text+='\n── 节点运行时状态 ──\n';
+  const nsKeys=Object.keys(nodeStatuses);
+  if(nsKeys.length>0){
+    nsKeys.forEach(k=>{
+      const s=nodeStatuses[k];
+      text+=`  ${k}: 运行${s.uptime||0}s  空闲RAM:${s.freeRAM||0}B  TX:${s.txPkts||0}  RX:${s.rxPkts||0}`;
+      if(s.freq)text+=`  频率:${s.freq}MHz SF${s.sf}`;
+      text+=`  更新:${Math.round((Date.now()-s.updated)/1000)}s前\n`;
+    });
+  }else{text+='  (无节点状态数据)\n';}
+
+  text+='\n── 消息流网格 ──\n';
+  text+='  列×行: '+gs.cols+'×'+gs.rows+'  已填: '+gs.cells.filter(c=>c!==null).length+'/'+gs.cells.length+'\n';
+  text+='  fillPtr: '+gs.fillPtr+'  processed: '+gs.processed+'  shifting: '+gs._shifting+'  busy: '+gs._busy+'\n';
+
+  text+='\n───────────────────────────────────────\n';
+  text+='  日志流 ('+logEntries.length+' 条)\n';
+  text+='───────────────────────────────────────\n\n';
   for(const e of all){
     const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
-    text+='['+e.title+']\n'+t+'\n'+e.detail.replace(/<[^>]*>/g,'')+'\n\n';
+    text+='['+e.title+'] '+t+'\n'+e.detail.replace(/<[^>]*>/g,'')+'\n\n';
   }
+  // 浏览器下载
   const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   a.download='comm-log-'+new Date().toISOString().slice(0,19).replace(/:/g,'-')+'.txt';
   a.click();
   URL.revokeObjectURL(a.href);
-  addLog('SYS','导出','📥 日志已导出 ('+logEntries.length+' 条)','#22c55e');
+  // 同步保存至服务器 log/ 文件夹
+  // 同步保存至服务器 log/ 文件夹
+  try{const r=await fetch('/api/save_log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text})});const j=await r.json();if(j.status==='ok'){addLog('SYS','导出','📥 已保存至 log/'+j.file+' ('+logEntries.length+' 条)','#22c55e');return;}}catch(e){}
+  addLog('SYS','导出','📥 浏览器下载 ('+logEntries.length+' 条)','#22c55e');
 }
 
 // ════════════════════ 信道面板 ════════════════════
@@ -950,8 +1578,7 @@ function sendPowerConfig(){
 }
 
 function updateChannelDisplay(){
-  const el=document.getElementById('current-channel');
-  if(el)el.textContent=`${currentFreq}MHz SF${currentSf}`;
+  document.querySelectorAll('#current-channel,#header-channel').forEach(el=>el.textContent=`${currentFreq}MHz SF${currentSf}`);
 }
 // 页面加载时初始化信道显示
 updateChannelDisplay();
@@ -967,6 +1594,7 @@ function startChannelSwitch(){
   if(!globalWs||globalWs.readyState!==1){addLog('SYS','信道','❌ WebSocket 未连接','#ef4444');return;}
   globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
   addLog('SYS','信道',`发起全网切换: ${currentFreq}MHz SF${currentSf} → ${freq}MHz SF${sf}`,'#22d3ee');
+  window._pendingFreq=freq; window._pendingSf=sf;  // ★ 直接记录目标信道，不依赖可能被过滤的 PREPARE 事件
 
   const prog=document.getElementById('channel-progress');
   prog.classList.remove('hidden');
@@ -974,11 +1602,25 @@ function startChannelSwitch(){
   banner.classList.add('hidden');
   _readyNodesSeen=new Set();  // ★ 新一轮切换，清空 READY 去重记录
   document.getElementById('channel-progress-steps').innerHTML=`
-    <div class="flex items-center gap-2" id="step-prepare"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:var(--cyan);color:#fff;">●</span><span>PREPARE — 广播切换参数 (${freq}MHz SF${sf}) ...</span></div>
-    <div class="flex items-center gap-2" id="step-commit" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>COMMIT — 收集节点就绪...</span></div>
-    <div class="flex items-center gap-2" id="step-verify" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">○</span><span>VERIFY — 等待心跳，确认新信道...</span></div>
+    <div class="flex items-center gap-2" id="step-prepare"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:var(--cyan);color:#fff;">1</span><span>PREPARE — 广播切换参数 (${freq}MHz SF${sf}) ...</span></div>
+    <div class="flex items-center gap-2" id="step-ready" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">2</span><span>READY — 等待节点就绪确认...</span></div>
+    <div class="flex items-center gap-2" id="step-commit" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">3</span><span>COMMIT — 执行信道切换...</span></div>
+    <div class="flex items-center gap-2" id="step-verify" style="opacity:0.4;"><span class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border" style="border-color:var(--brd);color:var(--mut);">4</span><span>VERIFY — 确认新信道在线状态...</span></div>
     <div id="ready-nodes" class="text-[10px] pl-7" style="color:var(--mut);"></div>
   `;
+  // ★ 启动超时检测（15s 后若未收到结果则提示）
+  clearTimeout(window._switchTimer);
+  window._switchTimer=setTimeout(()=>{
+    const banner=document.getElementById('channel-result-banner');
+    if(banner&&banner.classList.contains('hidden')){
+      banner.classList.remove('hidden');
+      banner.style.background='#f59e0b18';banner.style.border='1px solid #f59e0b';banner.style.color='#f59e0b';
+      banner.innerHTML='⚠ 等待确认超时 — 节点可能未响应，请检查日志';
+      const btn=document.getElementById('btn-channel-switch');
+      if(btn){btn.disabled=false;btn.style.opacity='1';}
+      _showToast('⚠','信道切换超时，未收到确认','#f59e0b');
+    }
+  },15000);
   document.getElementById('btn-channel-switch').disabled=true;
   document.getElementById('btn-channel-switch').style.opacity='0.5';
 }
@@ -991,7 +1633,7 @@ function wlSend(cmd){
   globalWs.send(JSON.stringify({action:'send_command',command:cmd}));
 }
 // ★ 白名单临时存储（wl_entry 事件填充，wl_end 渲染）
-let _wlEntries=[];
+let _wlEntries=[],_wlLoaded=false;
 let _wlKicked=new Set();  // ★ 被踢出的节点 ID 集合
 let _wlRefreshTimer=null;  // ★ WL? 防抖计时器
 function wlRefresh(){
@@ -1101,29 +1743,47 @@ function wlRender(){
 
 
 
-function clearFrontendState(){
+function clearFrontendState(keepLogs){
   // 重置节点 → 仅保留 PC
   activeNodes={'PC':{id:'PC',name:'PC 网关',cat:4,size:65,color:'#0ea5e9',lastSeen:Date.now(),decId:0}};
   activeLinks={};linkRssiCache={};linkRssiHistory={};currentRoute=null;
   nodeStatuses={};
   joinedNodeSet=new Set();networkReady=false;
   // 重置统计 & 阶段
-  lastStats={};lastPhase=null;phaseStartTime=Date.now();
-  updateStats({totalFrames:0,rreqCount:0,rrepCount:0,dataCount:0,ackCount:0,successRate:null,avgRssi:null});
+  lastStats={};sparkHistory={};_lastStatsUpdate=0;_msgGridState={cells:[],cols:0,rows:0,fillPtr:0,processed:0,_shifting:false,_grid:null,_busy:false,_pending:null};lastPhase=null;phaseStartTime=Date.now();
+  // 清空消息流网格 DOM
+  const msgGrid=document.getElementById('grid-msgTypeHistory');if(msgGrid)while(msgGrid.firstChild)msgGrid.removeChild(msgGrid.firstChild);
+  // 强制重建 stats bar
+  const bar=document.getElementById('stats-bar');if(bar)bar.innerHTML='';
+  updateStats({upRate:0,downRate:0,onlineNodes:0,totalNodes:0,activeLinks:0,msgTypeHistory:[],successRate:null,avgRssi:null});
   document.querySelectorAll('.phase-step').forEach((el,i)=>{
     const circle=el.querySelector('div:first-child'),label=el.querySelector('span');
     circle.style.background='transparent';circle.style.borderColor='var(--brd)';circle.style.color='var(--mut)';circle.textContent=String(i+1);circle.classList.remove('phase-active');label.style.color='var(--mut)';});
-  // 清空日志
-  logEntries=[];logSeq=0;lastLogSeq=-1;
-  const logContainer=document.getElementById('log-container');if(logContainer)logContainer.innerHTML='';
+  // 日志：根据用户选择决定是否清除
+  if(!keepLogs){
+    logEntries=[];logSeq=0;lastLogSeq=-1;
+    const logContainer=document.getElementById('log-container');if(logContainer)logContainer.innerHTML='';
+  }
   // 重渲染
   renderTopo();updateRssiChart();
 }
 
 async function resetAll(){
-  clearFrontendState();
+  if(!confirm('⚠️ 确定要完全重置吗？\n\n将关闭串口、清除所有拓扑节点与统计数据，恢复至初始状态。\n此操作不可撤销。'))return;
+  const keepLogs=confirm('📋 是否保留当前日志？\n\n点击「确定」保留日志，「取消」清除日志。');
+  // 关闭串口（如果已打开）
+  if(isSerialOpen&&globalWs&&globalWs.readyState===WebSocket.OPEN){
+    globalWs.send(JSON.stringify({action:'close_serial'}));
+  }
+  // 恢复 UI 到初始状态
+  isSerialOpen=false;_uiFrozen=true;_manualClose=true;
+  const btn=document.getElementById('btn-serial');
+  if(btn){btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';}
+  // 清除前端状态
+  clearFrontendState(keepLogs);
+  // 通知后端重置统计
   try{await fetch('/api/reset_stats');}catch(e){}
-  addLog('SYS','刷新','页面已重置，所有状态已清除','#22c55e');
+  addLog('SYS','重置',`↺ 页面已完全重置${keepLogs?'（日志已保留）':'（日志已清除）'}`,'#eab308');
 }
 
 
@@ -1158,24 +1818,25 @@ setInterval(()=>{
 },4000);
 
 // ════════════════════ WebSocket ════════════════════
-let isSerialOpen=false,globalWs=null;
+let isSerialOpen=false,_uiFrozen=true,_manualClose=false,globalWs=null;
 
 function toggleSerial(){
   const port=document.getElementById('port-select').value,baud=document.getElementById('baud-select').value,btn=document.getElementById('btn-serial');
   if(!port){alert('请选择串口');return;}
   if(!isSerialOpen){
     globalWs.send(JSON.stringify({action:'open_serial',port,baudrate:parseInt(baud)}));
-    btn.innerHTML='⏹ 关闭串口';btn.style.background='#ef4444';isSerialOpen=true;
+    btn.innerHTML='⏹ 关闭串口';btn.style.background='#ef4444';isSerialOpen=true;_uiFrozen=false;_manualClose=false;
     // 添加主节点到拓扑
     const now=Date.now();
     if(!activeNodes['0x10'])activeNodes['0x10']={id:'0x10',name:'主节点\n0x10',cat:0,size:60,color:'#f97316',lastSeen:now,decId:16};
     activeLinks['PC-0x10']={source:'PC',target:'0x10',rssi:null,lineColor:'#0ea5e9',lineWidth:3,lineType:'solid',inRoute:false};
     addLog('SYS','串口','正在连接 '+port+' ...','#22c55e');renderTopo();
+    _wlLoaded=false;  // 标记等待首帧后加载白名单
   }else{
     globalWs.send(JSON.stringify({action:'close_serial'}));
     btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;
-    clearFrontendState();
-    addLog('SYS','串口','串口已关闭，所有节点已离线','#eab308');
+    _uiFrozen=true;_manualClose=true;
+    addLog('SYS','串口','⏸ 串口已关闭，界面已冻结（日志保留）','#eab308');
   }
 }
 
@@ -1187,18 +1848,17 @@ function connectWS(){
   const proto=location.protocol==='https:'?'wss':'ws';globalWs=new WebSocket(`${proto}://${location.host}/ws`);
   globalWs.onopen=()=>{
     document.getElementById('ws-dot').style.background='var(--green)';document.getElementById('ws-dot').style.boxShadow='0 0 10px var(--green)';
-    document.getElementById('ws-label').textContent='在线';document.getElementById('ws-label').style.color='var(--green)';fetchPorts();
+    document.getElementById('ws-label').style.color='var(--green)';fetchPorts();
   };
   globalWs.onclose=()=>{
     document.getElementById('ws-dot').style.background='var(--red)';document.getElementById('ws-dot').style.boxShadow='0 0 10px var(--red)';
-    document.getElementById('ws-label').textContent='离线';document.getElementById('ws-label').style.color='var(--mut)';
+    document.getElementById('ws-label').style.color='var(--red)';
     setTimeout(connectWS,3000);
   };
   globalWs.onmessage=(ev)=>{
     const d=JSON.parse(ev.data);
     if(d.type==='sys'){addLog('SYS','系统',d.msg,'#22c55e');return;}
-    if(d.type==='sys_error'){addLog('SYS','错误',d.msg,'#ef4444');const btn=document.getElementById('btn-serial');btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;
-      clearFrontendState();return;}
+    if(d.type==='sys_error'){addLog('SYS','错误',d.msg,'#ef4444');const btn=document.getElementById('btn-serial');btn.innerHTML='🔌 打开串口';btn.style.background='var(--cyan)';isSerialOpen=false;_uiFrozen=true;_manualClose=true;return;}
     if(d.type==='route_fail'||d.type==='phase_timeout'){
       currentRoute=null;
       for(let k in activeLinks)activeLinks[k].inRoute=false;
@@ -1248,11 +1908,14 @@ function connectWS(){
       }
       return;
     }
-    if(d.type==='stats'){updateStats(d.data);
+    if(d.type==='stats'){
+      updateStats(d.data);  // auto-sync 和 freeze 逻辑在 updateStats 内部处理
+      if(!_uiFrozen){
       // ★ 周期 stats 不触发路由高亮（高亮仅由 ACK_CONFIRM 触发）
       if(d.data.currentRoute){currentRoute=d.data.currentRoute;}
       if(d.data.currentPhase)updatePhaseIndicator(d.data.currentPhase);
       if(d.data.rssiHistory){for(let lk in d.data.rssiHistory){if(!linkRssiHistory[lk])linkRssiHistory[lk]=[];d.data.rssiHistory[lk].forEach(p=>{if(!linkRssiHistory[lk].find(x=>Math.abs(x.time-p.t)<0.1))linkRssiHistory[lk].push({time:p.t,rssi:p.rssi});});if(linkRssiHistory[lk].length>120)linkRssiHistory[lk]=linkRssiHistory[lk].slice(-120);}updateRssiChart();}
+      }
       return;
     }
     if(d.type==='cmd_ack'){
@@ -1271,6 +1934,8 @@ function connectWS(){
       }else if(d.phase==='ready'){
         // ★ 去重：同一节点多次 READY（因 PREPARE 重试）只显示一次
         const nodeKey='ready_'+d.nodeHex;
+        const readyStep=document.getElementById('step-ready');
+        if(readyStep){readyStep.style.opacity='1';const rs=readyStep.querySelector('span:first-child');if(rs){rs.style.background='var(--cyan)';rs.style.color='#fff';rs.style.borderColor='var(--cyan)';rs.textContent='✓';}}
         if(!_readyNodesSeen.has(nodeKey)){
           _readyNodesSeen.add(nodeKey);
           const readyDiv=document.getElementById('ready-nodes');
@@ -1283,13 +1948,7 @@ function connectWS(){
         addLog('SYS','2PC',d.msg,d.status===0?'#22c55e':'#ef4444');
       }else if(d.phase==='commit'){
         const commitStep=document.getElementById('step-commit');
-        if(commitStep){
-          commitStep.style.opacity='1';
-          commitStep.querySelector('span:first-child').style.background='var(--cyan)';
-          commitStep.querySelector('span:first-child').style.color='#fff';
-          commitStep.querySelector('span:first-child').style.borderColor='var(--cyan)';
-          commitStep.querySelector('span:first-child').textContent='●';
-        }
+        if(commitStep){commitStep.style.opacity='1';const cs=commitStep.querySelector('span:first-child');if(cs){cs.style.background='var(--cyan)';cs.style.color='#fff';cs.style.borderColor='var(--cyan)';cs.textContent='✓';}}
         addLog('SYS','2PC',d.msg,'#22d3ee');
       }
       return;
@@ -1302,13 +1961,9 @@ function connectWS(){
       return;
     }
     if(d.type==='channel_switch_result'){
-      // ★ 兜底：如果 COMMIT 进度事件没到达，在结果到来时补亮 COMMIT 步骤
-      const commitStep=document.getElementById('step-commit');
-      if(commitStep){
-        commitStep.style.opacity='1';
-        const cs=commitStep.querySelector('span:first-child');
-        if(cs){cs.style.background='var(--cyan)';cs.style.color='#fff';cs.style.borderColor='var(--cyan)';cs.textContent='●';}
-      }
+      clearTimeout(window._switchTimer);
+      // ★ 兜底：补亮 READY + COMMIT 步骤
+      ['step-ready','step-commit'].forEach(id=>{const el=document.getElementById(id);if(el){el.style.opacity='1';const s=el.querySelector('span:first-child');if(s){s.style.background='var(--cyan)';s.style.color='#fff';s.style.borderColor='var(--cyan)';s.textContent='✓';}}});
       const verifyStep=document.getElementById('step-verify');
       const readyDiv=document.getElementById('ready-nodes');
       const isAllOnline=d.onlineCount===d.totalNodes;
@@ -1336,19 +1991,14 @@ function connectWS(){
           readyDiv.innerHTML+=`<br/><span style="color:${summaryColor};font-weight:bold;">${summaryIcon} 切换${isAllOnline?'成功':'部分成功'}: ${d.onlineCount}/${d.totalNodes} 节点在新信道在线</span>`;
         }
       }
-      // ★ 更新当前信道显示
-      if(isAllOnline){
-        // 从两阶段提交事件中推断的新频率（在 two_phase_progress prepare 中记录）
-        // 这里用节点全部在线作为切换成功的信号
-        const el=document.getElementById('current-channel');
-        if(el&&window._pendingFreq){
-          currentFreq=window._pendingFreq; currentSf=window._pendingSf;
-          el.textContent=`${currentFreq}MHz SF${currentSf}`;
-          el.style.color='#22d3ee';
-          // 同步更新输入框默认值
-          document.getElementById('cfg-freq-all').value=currentFreq;
-          document.getElementById('cfg-sf-all').value=currentSf;
-        }
+      // ★ 更新信道显示（无论全部在线与否，信道已切换）
+      if(window._pendingFreq){
+        currentFreq=window._pendingFreq; currentSf=window._pendingSf;
+        updateChannelDisplay();
+        window._pendingFreq=null; window._pendingSf=null;
+        // 同步更新输入框默认值
+        document.getElementById('cfg-freq-all').value=currentFreq;
+        document.getElementById('cfg-sf-all').value=currentSf;
       }
       // ★ 结果横幅：醒目显示最终状态
       const banner=document.getElementById('channel-result-banner');
@@ -1371,6 +2021,8 @@ function connectWS(){
       addLog('SYS','信道切换',d.msg,isAllOnline?'#22c55e':'#f59e0b');
       const btn=document.getElementById('btn-channel-switch');
       if(btn){btn.disabled=false;btn.style.opacity='1';}
+      // ★ Toast 通知（不依赖面板打开）
+      _showToast(isAllOnline?'✅':(d.onlineCount>0?'⚠':'❌'),d.msg,isAllOnline?'#22c55e':(d.onlineCount>0?'#f59e0b':'#ef4444'));
       return;
     }
         if(d.data && d.data.hbOnline){
@@ -1380,6 +2032,7 @@ function connectWS(){
     if(d.data && d.data.hbOffline){
       let n=d.data.hbOffline.node;
       addLog('SYS','OFFLINE','0x'+n.toString(16).toUpperCase()+' is OFFLINE','#ef4444');
+      if(!_uiFrozen){
       let h=hex(n);
       if(activeNodes[h] && h!=='PC' && h!=='0x10'){
         delete activeNodes[h];
@@ -1387,6 +2040,7 @@ function connectWS(){
           if(activeLinks[lk].source===h || activeLinks[lk].target===h) delete activeLinks[lk];
         }
         renderTopo();
+      }
       }
     }
     if(d.type==='wl_entry'){
@@ -1449,6 +2103,8 @@ function connectWS(){
       return;
     }
     if(d.type==='frame'){
+      // ★ 首帧到达 → 串口已就绪，自动加载白名单
+      if(!_wlLoaded&&isSerialOpen){_wlLoaded=true;wlRefresh();}
       const m=MSG_META[d.msgType]||['UNKN','未知','#6b7280'];
       // 追踪入网状态
       if(d.msgType===MSG_JOIN_OK){
@@ -1466,18 +2122,26 @@ function connectWS(){
       if(d._retry){detail+=`<br/>🔄 重传: <b style="color:#ef4444;">第 ${d._retry} 次发送</b>`;}
       detail+=`<br/><span style="color:var(--mut);font-size:10px;">data: ${d.dataHex}</span>`;
       const logTitle=m[0]+' '+m[1]+(d._retry?' (重传#'+d._retry+')':'');
-      addLog(m[0],logTitle,detail,m[2]);
-      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK||d.msgType===MSG_ACK_CONFIRM){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{if(d.src!==0xFF)ensureNode(d.src,Date.now());if(d.dest!==0x00&&d.dest!==0xFF)ensureNode(d.dest,Date.now());renderTopo();}
+      addLog(m[0],logTitle,detail,m[2],d.stats?d.stats.totalFrames:null);
+      if(!_uiFrozen){
+      if(d.msgType===MSG_RREQ||d.msgType===MSG_RREP||d.msgType===MSG_DATA||d.msgType===MSG_ACK||d.msgType===MSG_ACK_CONFIRM){updateTopology(d.src,d.dest,d.msgType,d.pathId,d.count,d.rssiStamps||[],d.relays||[],d.lastHopRssi);}else{if(d.src!==0xFF)ensureNode(d.src,Date.now());if(d.dest!==0x00&&d.dest!==0xFF)ensureNode(d.dest,Date.now());
+      // ★ 同步 stats.linkRssi → 本地缓存（HB 邻居 RSSI 等非 RREQ 来源）
+      if(d.stats&&d.stats.linkRssi){for(let lk in d.stats.linkRssi){const v=d.stats.linkRssi[lk];if(v!=null){linkRssiCache[lk]=v;if(!activeLinks[lk]){const[a,b]=lk.split('-');if(activeNodes[a]&&activeNodes[a].stale||activeNodes[b]&&activeNodes[b].stale)continue;activeLinks[lk]={source:a,target:b,rssi:v,lastUpdated:Date.now()};}else{activeLinks[lk].rssi=v;activeLinks[lk].lastUpdated=Date.now();}}}}
+      renderTopo();}
       if(d.stats)updateStats(d.stats);
+      }
     }
   };
 }
 
 // ════════════════════ 启动 ════════════════════
 connectWS();
-updateStats({totalFrames:0,rreqCount:0,rrepCount:0,dataCount:0,ackCount:0,successRate:null,avgRssi:null});
+updateStats({upRate:0,downRate:0,onlineNodes:0,totalNodes:0,activeLinks:0,msgTypeHistory:[],successRate:null,avgRssi:null});
 // 初始更新 RSSI 图
 setInterval(updateRssiChart,5000);
 </script>
+<div id="msg-popup" class="msg-popup"></div>
+<div id="spark-tip" class="spark-tip"></div>
+<div id="toast" class="toast"></div>
 </body>
 </html>

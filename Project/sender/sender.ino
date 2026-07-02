@@ -28,7 +28,6 @@ const uint8_t FRAME_SIZE     = 16;
 const uint8_t MSG_CMD_PREPARE = 0x0A;
 const uint8_t MSG_CMD_READY   = 0x0B;
 const uint8_t MSG_CMD_COMMIT  = 0x0C;
-const uint8_t MSG_NODE_STATUS = 0x07;  // 节点状态上报
 const uint8_t BROADCAST_ID    = 0xFF;
 
 #pragma pack(push, 1)
@@ -91,11 +90,11 @@ bool     readyPending = false;
 uint32_t readySendTime = 0;
 uint8_t  readyStatusVal = 0;
 
-// ★ 节点状态上报
+// ★ 节点状态 + 邻居 RSSI（合并进 HB）
 uint16_t txPacketCount = 0;
 uint16_t rxPacketCount = 0;
-uint32_t lastStatusTime = 0;
-const uint16_t STATUS_INTERVAL = 15000;
+uint8_t  lastHeardId   = 0;     // 最近监听到的邻居节点 ID
+int8_t   lastHeardRssi = 0;     // 该邻居的 RSSI
 
 int freeMemory() {
   extern int __heap_start, *__brkval;
@@ -103,30 +102,7 @@ int freeMemory() {
   return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
 }
 
-void sendNodeStatus() {
-  LoRaFrame st;
-  memset(&st, 0, FRAME_SIZE);
-  st.head[0] = FRAME_HEADER_0;
-  st.head[1] = FRAME_HEADER_1;
-  st.srcId   = MY_NODE_ID;
-  st.destId  = 0x10;
-  st.msgType = MSG_NODE_STATUS;
-  uint32_t uptime = millis() / 1000;
-  uint16_t freeRam = (uint16_t)freeMemory();
-  st.data[0] = (uptime >> 8) & 0xFF;
-  st.data[1] = uptime & 0xFF;
-  st.data[2] = (freeRam >> 8) & 0xFF;
-  st.data[3] = freeRam & 0xFF;
-  st.data[4] = (txPacketCount >> 8) & 0xFF;
-  st.data[5] = txPacketCount & 0xFF;
-  st.data[6] = (rxPacketCount >> 8) & 0xFF;
-  st.data[7] = rxPacketCount & 0xFF;
-  calcChecksum(&st);
-  LoRa.beginPacket();
-  LoRa.write((uint8_t*)&st, FRAME_SIZE);
-  LoRa.endPacket(); txPacketCount++;
-}
-
+// (sendNodeStatus removed — merged into sendHeartbeat)
 // =============================================
 void setup() {
   // LoRa.setPins(A3);
@@ -170,12 +146,8 @@ void loop() {
     Serial.println(readyStatusVal, DEC);
   }
   if (pauseAODV) return;  // 两阶段提交进行中，暂停正常通信
-  // ★ 定期上报节点状态
-  if (millis() - lastStatusTime >= STATUS_INTERVAL) {
-    lastStatusTime = millis();
-    sendNodeStatus();
-  }
-  // Heartbeat: 10s +/- 2s jitter
+  // ★ 节点状态已合并入 sendHeartbeat，不再单独发送 MSG_NODE_STATUS
+  // Heartbeat: 10s +/- 2s jitter (carries uptime + freeRAM + txPkts + neighbor RSSI)
   if (millis() - lastHbTime >= hbInterval) {
     sendHeartbeat();
     lastHbTime = millis();
@@ -368,13 +340,26 @@ void sendHeartbeat() {
   frame.srcId   = MY_NODE_ID;
   frame.destId  = DEST_ID;
   frame.msgType = MSG_HB;
-  frame.data[0] = 0;
+  // ★ 富心跳 v2：uptime 1B + freeRAM 1B + txPkts 2B + rxPkts 2B + neighbor RSSI
+  uint32_t uptime = millis() / 1000;
+  uint16_t freeRam = (uint16_t)freeMemory();
+  frame.data[0] = (uint8_t)(uptime >> 2);             // uptime/4, 0-1020s
+  frame.data[1] = (uint8_t)(freeRam >> 3);            // freeRAM/8, 0-2040B
+  frame.data[2] = (txPacketCount >> 8) & 0xFF;
+  frame.data[3] = txPacketCount & 0xFF;
+  frame.data[4] = (rxPacketCount >> 8) & 0xFF;
+  frame.data[5] = rxPacketCount & 0xFF;
+  frame.data[6] = lastHeardId;
+  frame.data[7] = lastHeardRssi;
   calcChecksum(&frame);
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
   LoRa.endPacket(); txPacketCount++;
-  Serial.print(F("HB tx r="));
-  Serial.println(LoRa.packetRssi(), DEC);
+  Serial.print(F("HB tx nbr=0x"));
+  Serial.print(lastHeardId, HEX);
+  Serial.print(F(" r="));
+  Serial.print(lastHeardRssi, DEC);
+  Serial.println();
 }
 
 void sendJOIN() {
@@ -434,10 +419,19 @@ void checkForPacket() {
 
   LoRaFrame frame;
   LoRa.readBytes((uint8_t*)&frame, FRAME_SIZE);
+  rxPacketCount++;  // ★ 统计接收包数
 
   // 过滤
   if (frame.head[0] != FRAME_HEADER_0 || frame.head[1] != FRAME_HEADER_1) {
     return;
+  }
+  // ★ 记录邻居 RSSI（用于富心跳上报，即使不处理此帧类型也记录）
+  {
+    int r = LoRa.packetRssi();
+    if (frame.srcId != MY_NODE_ID && frame.srcId != BROADCAST_ID) {
+      lastHeardId   = frame.srcId;
+      lastHeardRssi = r;
+    }
   }
   if (frame.destId != MY_NODE_ID && frame.destId != BROADCAST_ID) {
     return;

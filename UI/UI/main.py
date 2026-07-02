@@ -1,7 +1,7 @@
 import asyncio, struct, serial, serial.tools.list_ports, threading, json, time, os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from collections import defaultdict, deque
 
 # ════════════════════ 帧格式常量 ════════════════════
@@ -74,6 +74,12 @@ class StatsTracker:
         self._LINK_FAIL_THRESHOLD = 1       # 一个周期内 sender 已重试 3 次，周期末即可判定
         self._current_rreq_links = set()    # 本轮 RREQ 中刷新了 RSSI 的链路
         self._known_links = set()           # 历史上所有出现过 RSSI 的链路（作为比较基准）
+        self._link_last_update = {}        # 每条链路最后 RSSI 更新时间
+        self._online_nodes = set()          # ★ 当前在线节点集合（HB+RREQ 双源同步）
+        self._up_times = deque(maxlen=80)     # 上传帧时间戳（src=0x10）
+        self._down_times = deque(maxlen=80)   # 下载帧时间戳（dest=0x10）
+        self._cycle_history = deque(maxlen=10)  # 最近 10 轮通信结果 True=成功
+        self._msg_type_history = []  # 消息类型历史（不设上限，前端网格只取最近40条）
         self._pending_events = []           # 待广播的事件列表
 
     def _link_key(self, a: int, b: int) -> str:
@@ -83,8 +89,16 @@ class StatsTracker:
     def record_frame(self, src: int, dest: int, msg_type: int,
                      path_id: int, count: int, stamps: list, relays: list):
         self.total_frames += 1
-        self.nodes_seen.update([src, dest])
         now = time.time()
+        # ★ 上传/下载速率：每帧 16 字节
+        if src == 0x10:    self._up_times.append(now)
+        if dest == 0x10:   self._down_times.append(now)
+        # ★ 消息流图：存储完整帧信息（类型+时间+收发方），前端弹窗可展示详情
+        self._msg_type_history.append({
+            "t": msg_type, "ts": now, "s": src, "d": dest,
+            "seq": self.total_frames  # ★ 关联日志序号，前端可跳转
+        })
+        self.nodes_seen.update([src, dest])
 
         # 每节点计数
         self.node_stats[src]["sent"] += 1
@@ -121,6 +135,7 @@ class StatsTracker:
                 # ★ 链路 RSSI 刷新 → 重置失败计数 + 加入已知链路
                 was_broken = self._link_fail_count.get(key, 0) >= self._LINK_FAIL_THRESHOLD
                 self.link_rssi[key] = s["rssi"]
+                self._link_last_update[key] = now
                 self.rssi_history[key].append((now, s["rssi"]))
                 self._link_fail_count[key] = 0
                 self._known_links.add(key)
@@ -140,6 +155,7 @@ class StatsTracker:
                 if msg_type == MSG_RREQ:
                     self._current_rreq_nodes.add(rid)
                     self._current_rreq_links.add(key)
+                    self._online_nodes.add(rid)  # 能转发 RREQ = 确认在线
                 prev = rid
             # 最终跳 → dest（也追踪链路，写入 _known_links 作为全量基准）
             if prev != dest:
@@ -234,6 +250,7 @@ class StatsTracker:
                         for l in node_links
                     )
                     if all_broken:
+                        self._online_nodes.discard(nid)  # ★ 同步在线集合
                         role = NODE_ROLES.get(nid, {}).get("role", "未知")
                         self._pending_events.append({
                             "type": "node_offline",
@@ -249,6 +266,7 @@ class StatsTracker:
             self.cycle_attempts += 1
             if success:
                 self.cycle_successes += 1
+            self._cycle_history.append(success)
             self._cycle_pending = False
 
     def mark_cycle_failed(self, fail_phase: str):
@@ -267,6 +285,7 @@ class StatsTracker:
             self._known_links.discard(lk)
             self._link_fail_count.pop(lk, None)
             self.link_rssi.pop(lk, None)
+            self._link_last_update.pop(lk, None)
             self.rssi_history.pop(lk, None)
         # Also clean current_rreq_links so no in-flight cycle references remain
         stale = [lk for lk in self._current_rreq_links if node_hex in lk]
@@ -277,8 +296,10 @@ class StatsTracker:
         """Process HB alerts from mainTerm (count=0 online, count=0xFF offline)"""
         if count == 0xFF:
             self._last_offline = {"node": src, "time": time.time()}
+            self._online_nodes.discard(src)  # ★ 同步在线集合
         elif count == 0:
             self._last_online = {"node": src, "time": time.time()}
+            self._online_nodes.add(src)      # ★ 同步在线集合
 
     def record_bad(self):
         self.bad += 1
@@ -331,6 +352,12 @@ class StatsTracker:
         }
 
     def to_dict(self):
+        now = time.time()
+        # ★ 在线节点：使用 _online_nodes 集合（HB 告警 + RREQ 断裂双源同步）
+        #    mainTerm (0x10) 通过串口直连，始终计入
+        online_nodes = len(self._online_nodes) + 1  # +1 = mainTerm
+        total_nodes = sum(1 for nid in self.node_stats
+                         if nid != 0x00 and self.node_stats[nid]["lastSeen"] > 0)
         return {
             "totalFrames": self.total_frames,
             "rreqCount":   self.rreq,
@@ -351,6 +378,22 @@ class StatsTracker:
             "linkRssi":    self.link_rssi,
             "nodeStats":   {f"0x{k:02X}": dict(v) for k, v in self.node_stats.items()},
             "rssiHistory": self.get_rssi_history(),
+            "onlineNodes": online_nodes,
+            "totalNodes":  total_nodes,
+            "onlineNodeIds": sorted(self._online_nodes),  # ★ 在线节点 ID 列表，前端显示指示灯
+            "cycleHistory": list(self._cycle_history),     # ★ 最近 10 轮周期结果
+            "msgTypeHistory": list(self._msg_type_history),  # ★ 最近 40 帧消息类型
+            "activeLinks": sum(1 for lk, lu in self._link_last_update.items()
+                               if now - lu < 30
+                               and self._link_fail_count.get(lk, 0) < self._LINK_FAIL_THRESHOLD),
+            # ★ 上传/下载速率 (Bytes/s): 每帧 16B，30s 滑动窗口
+            # ★ 速率 = 最近 5s 帧数 × 16B / 5s = Bytes/s
+            "upRate":   round(sum(1 for t in self._up_times   if now - t < 5) * 16 / 5, 1),
+            "downRate": round(sum(1 for t in self._down_times if now - t < 5) * 16 / 5, 1),
+            "activeLinkKeys": [lk for lk, lu in self._link_last_update.items()
+                               if now - lu < 30
+                               and self._link_fail_count.get(lk, 0) < self._LINK_FAIL_THRESHOLD],
+            "serialRunning": serial_is_running,  # ★ 前端刷新后同步串口状态
         }
 
 stats = StatsTracker()
@@ -386,6 +429,10 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)  # 静默，不刷日志
+
 @app.get("/")
 async def serve_index():
     return FileResponse(os.path.join(BASE_DIR, "index.html"))
@@ -401,6 +448,23 @@ def get_stats():
 @app.get("/api/reset_stats")
 def reset_stats():
     stats.reset(); return {"status":"ok","msg":"统计已重置"}
+
+LOG_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "log")
+os.makedirs(LOG_SAVE_DIR, exist_ok=True)
+
+@app.post("/api/save_log")
+async def save_log(request: Request):
+    try:
+        data = await request.json()
+        content = data.get("content", "")
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        filename = f"diagnostic-{ts}.txt"
+        filepath = os.path.join(LOG_SAVE_DIR, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"status": "ok", "file": filename}
+    except Exception as e:
+        return {"status": "error", "msg": str(e)}
 
 @app.get("/api/nodes")
 def get_nodes():
@@ -589,6 +653,58 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                             for evt in stats.get_pending_events():
                                 asyncio.run_coroutine_threadsafe(
                                     manager.broadcast(json.dumps(evt)), loop)
+                            # ★ 富心跳 v2：从 HB 帧中提取状态 + 邻居 RSSI
+                            #   布局: data[0]=uptime>>2, data[1]=freeRAM>>3,
+                            #         data[2:4]=txPkts, data[4:6]=rxPkts,
+                            #         data[6]=neighborId, data[7]=neighborRssi
+                            #   （区分真 HB [data 非零] 与 mainTerm 告警帧 [data 全零]）
+                            is_hb_alert = False  # 告警帧标记：跳过前端日志广播
+                            if msg_type == MSG_HEARTBEAT:
+                                if data_bytes[0] or data_bytes[1]:
+                                    # ── 真 HB：提取状态 + 邻居 RSSI ──
+                                    uptime   = data_bytes[0] * 4         # 解压: uptime>>2
+                                    free_ram = data_bytes[1] * 8         # 解压: freeRAM>>3
+                                    tx_pkts  = (data_bytes[2] << 8) | data_bytes[3]
+                                    rx_pkts  = (data_bytes[4] << 8) | data_bytes[5]
+                                    nbr_id   = data_bytes[6]
+                                    nbr_rssi = to_int8(data_bytes[7]) if nbr_id != 0 else None
+                                    _node_status_cache[src] = {
+                                        "uptime": uptime, "freeRAM": free_ram,
+                                        "txPkts": tx_pkts, "rxPkts": rx_pkts,
+                                        "updated": time.time()
+                                    }
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "node_status",
+                                        "nodeId": src,
+                                        "nodeHex": f"0x{src:02X}",
+                                        "uptime": uptime,
+                                        "freeRAM": free_ram,
+                                        "txPkts": tx_pkts,
+                                        "rxPkts": rx_pkts,
+                                    })), loop)
+                                    # ★ 邻居 RSSI → 拓扑显示 + 存活证明
+                                    if nbr_id != 0 and nbr_rssi is not None:
+                                        lo, hi = (src, nbr_id) if src < nbr_id else (nbr_id, src)
+                                        key = f"0x{lo:02X}-0x{hi:02X}"
+                                        stats.link_rssi[key] = nbr_rssi
+                                        stats._link_last_update[key] = time.time()
+                                        stats.rssi_history[key].append((time.time(), nbr_rssi))
+                                        # ★ HB 证明链路物理存活 → 重置失败计数 + 标记本周期已刷新
+                                        #   （解决"路径变更导致非选中链路被误判断裂"）
+                                        if key in stats._known_links:
+                                            was_broken = stats._link_fail_count.get(key, 0) >= stats._LINK_FAIL_THRESHOLD
+                                            stats._link_fail_count[key] = 0
+                                            stats._current_rreq_links.add(key)
+                                            if was_broken:
+                                                asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                                    "type": "link_restored",
+                                                    "linkKey": key,
+                                                    "msg": f"链路 {key} RSSI 已恢复 (HB)"
+                                                })), loop)
+                                else:
+                                    # ── 告警帧（data 全零）：仅用于 _handle_heartbeat 在线/离线检测，
+                                    #     不广播 frame_msg 到前端日志（避免用户看到重复 HB）
+                                    is_hb_alert = True
                             frame_msg = {
                                 "type":"frame","src":src,"dest":dest,"msgType":msg_type,
                                 "msgTypeName":MSG_NAMES.get(msg_type,"UNKN"),
@@ -600,8 +716,9 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                             if last_hop is not None:
                                 frame_msg["lastHopRssi"] = last_hop
                             # ★ 切换结果帧不广播原始帧（已有 channel_switch_result 专用事件）
+                            #    告警帧（is_hb_alert）也不广播——避免前端日志重复显示 HB
                             is_commit_result = (msg_type == MSG_CMD_COMMIT and data_bytes[0] == 0x01)
-                            if not is_commit_result:
+                            if not is_commit_result and not is_hb_alert:
                                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps(frame_msg)), loop)
                             # === Two-phase commit and channel switch handling ===
                             if msg_type == MSG_CMD_READY:
@@ -636,7 +753,7 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                     # 切换结果帧
                                     readyMask = data_bytes[1]
                                     onlineMask = data_bytes[2]
-                                    total = 3
+                                    total = max(bin(readyMask).count("1"), bin(onlineMask).count("1"))
                                     onlineCount = bin(onlineMask).count("1")
                                     # ★ 逐节点在线状态
                                     nodes_status = {
@@ -740,11 +857,65 @@ PHASE_TIMEOUTS = {
     "data": 5.0,   # DATA: 正常 <1s，超过 5s 异常
     "ack":  4.0,   # ACK: 3 次重传 × 800ms ≈ 2.4s，4s 起检
 }
+# ════════════════════ 诊断日志 ════════════════════
+LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+_diag_counter = 0
+
+def write_diagnostic_log():
+    global _diag_counter
+    _diag_counter += 1
+    now = time.time()
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    d = stats.to_dict()
+    mh = d.get("msgTypeHistory", [])
+    msg_names = []
+    for obj in mh:
+        mt = obj["t"] if isinstance(obj, dict) else obj
+        name = MSG_NAMES.get(mt, f"0x{mt:02X}")
+        msg_names.append(name)
+
+    lines = []
+    lines.append(f"═══ 诊断 #{_diag_counter} | {ts} | 运行 {now - stats._start_time:.0f}s ═══")
+    lines.append(f"")
+    lines.append(f"── 帧统计 ──")
+    lines.append(f"  总帧: {d['totalFrames']}  RREQ: {d['rreqCount']}  RREP: {d['rrepCount']}  DATA: {d['dataCount']}  ACK: {d['ackCount']}  坏帧: {d['badFrames']}")
+    lines.append(f"")
+    lines.append(f"── msgTypeHistory (共 {len(mh)} 条) ──")
+    lines.append(f"  全部: {msg_names}")
+    lines.append(f"  最近10: {msg_names[-10:] if len(msg_names) > 10 else msg_names}")
+    lines.append(f"")
+    lines.append(f"── 在线状态 ──")
+    lines.append(f"  在线节点: {d['onlineNodes']}/{d['totalNodes']}  IDs: {d.get('onlineNodeIds', [])}")
+    lines.append(f"  活跃链路: {d['activeLinks']}  链路: {d.get('activeLinkKeys', [])}")
+    lines.append(f"  当前阶段: {d.get('currentPhase', '?')}")
+    lines.append(f"")
+    lines.append(f"── 速率 ──")
+    lines.append(f"  上传: {d['upRate']} B/s  下载: {d['downRate']} B/s")
+    lines.append(f"  RSSI: {d.get('avgRssi', '?')}  成功率: {d.get('successRate', '?')}")
+    lines.append(f"")
+    lines.append(f"── 前端 msgGrid 预期 ──")
+    lines.append(f"  history 条数: {len(mh)}  应填格数: {len(mh)}  (每格 100ms)")
+    if len(mh) >= 40:
+        lines.append(f"  ⚠ 已满 40 条，前端应触发平移 + 继续填入新消息")
+    else:
+        lines.append(f"  尚需 {40 - len(mh)} 条填满 40 格")
+    lines.append(f"")
+
+    log_path = os.path.join(LOG_DIR, "diag-log.txt")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
 async def periodic_stats():
+    # ★ 记录启动时间戳（用于诊断）
+    stats._start_time = time.time()
     while True:
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
         try: await manager.broadcast_stats()
         except Exception: pass
+        # ★ 每 5 秒写一次诊断日志
+        if int(time.time()) % 5 == 0:
+            try: write_diagnostic_log()
+            except Exception: pass
         # ★ 广播待处理事件（如离线检测，兜底保障）
         for evt in stats.get_pending_events():
             try: await manager.broadcast(json.dumps(evt))
