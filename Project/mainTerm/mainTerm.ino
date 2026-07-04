@@ -772,7 +772,10 @@ void evaluateAndReply() {
         bestDirectIdx = i;
       }
     } else {
-      if (candidates[i].bottleneckRssi > bestRelayedRssi) {
+      // ★ 瓶颈优先；相同时跳数少者胜
+      if (candidates[i].bottleneckRssi > bestRelayedRssi ||
+          (candidates[i].bottleneckRssi == bestRelayedRssi &&
+           candidates[i].stampCount < candidates[bestRelayedIdx].stampCount)) {
         bestRelayedRssi = candidates[i].bottleneckRssi;
         bestRelayedIdx = i;
       }

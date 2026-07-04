@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>通信系统综合设计与实践</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="tailwind.min.js"></script>
+<script src="echarts.min.js"></script>
 <style>
 :root{--bg:#0b1120;--card:#111827;--brd:#1e293b;--txt:#cbd5e1;--mut:#64748b;
   --cyan:#22d3ee;--orange:#f97316;--green:#22c55e;--yellow:#eab308;--red:#ef4444;--purple:#a78bfa;--blue:#3b82f6;}
@@ -70,7 +70,6 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
     <button onclick="showChannelPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">⚙️ 信道</button>
     <button onclick="showWhitelistPanel()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📋 白名单</button>
     <button id="btn-reset" onclick="resetAll()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:#ef4444;">↺ 重置</button>
-    <button onclick="exportLogs()" class="btn-trans text-sm font-semibold px-3 py-1.5 rounded-md" style="background:var(--card);border:1px solid var(--brd);color:var(--txt);">📥 导出日志</button>
     <div class="w-px h-5" style="background:var(--brd);"></div>
     <div id="ws-dot" class="w-2.5 h-2.5 rounded-full" style="background:var(--red);box-shadow:0 0 8px var(--red);"></div>
     <span id="ws-label" class="text-xs font-mono" style="color:var(--red);">后端</span>
@@ -145,19 +144,43 @@ body{background:var(--bg);color:var(--txt);font-family:'Inter','Segoe UI',system
   </aside>
 </main>
 
-<!-- ════════════ BOTTOM: RSSI 趋势图 ════════════ -->
-<div id="rssi-panel" class="border-t flex-shrink-0" style="background:var(--card);border-color:var(--brd);height:190px;">
-  <div class="flex items-center justify-between px-4 py-1.5 border-b" style="border-color:var(--brd);">
-    <span class="text-xs font-semibold uppercase tracking-wider" style="color:var(--mut);">📶 RSSI 趋势图</span>
-    <div class="flex items-center gap-2">
-      <span id="rssi-age" class="text-[10px]" style="color:var(--mut);display:none;"></span>
-      <select id="rssi-link-select" onchange="updateRssiChart()" class="text-xs rounded px-2 py-0.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
-        <option value="">-- 选择链路 --</option>
-      </select>
-      <button onclick="toggleRssiPanel()" class="text-xs" style="color:var(--mut);">▼ 收起</button>
+<!-- ════════════ BOTTOM: 传感器面板 + RSSI 趋势图 ════════════ -->
+<div id="bottom-panel" class="border-t flex-shrink-0 flex" style="background:var(--card);border-color:var(--brd);height:190px;">
+  <!-- 左：传感器面板 -->
+  <div id="sensor-dash" class="flex-shrink-0 flex flex-col border-r" style="width:200px;border-color:var(--brd);">
+    <div class="px-3 py-1.5 border-b" style="border-color:var(--brd);">
+      <span class="text-xs font-semibold" style="color:#22d3ee;">🌡 环境监测 · sender</span>
+    </div>
+    <div class="flex-1 px-3 py-2 space-y-1.5 text-xs">
+      <div class="flex justify-between"><span style="color:var(--mut);">温度</span><b id="sd-temp" style="color:#f97316;font-size:15px;">--</b><span style="color:var(--mut);font-size:10px;">°C</span></div>
+      <div class="flex justify-between"><span style="color:var(--mut);">湿度</span><b id="sd-hum" style="color:#0ea5e9;font-size:15px;">--</b><span style="color:var(--mut);font-size:10px;">%</span></div>
+      <div class="flex justify-between"><span style="color:var(--mut);">电位</span><b id="sd-light" style="color:#eab308;font-size:15px;">--</b><span style="color:var(--mut);font-size:10px;">%</span></div>
+      <div id="sd-alert" class="hidden text-[10px]" style="color:#fca5a5;">⚠ 传感器异常</div>
+    </div>
+    <div class="px-3 py-1 border-t" style="border-color:var(--brd);">
+      <span id="sd-time" style="font-size:10px;color:var(--mut);"></span>
     </div>
   </div>
-  <div id="rssi-chart" style="width:100%;height:155px;"></div>
+  <!-- 右：RSSI 趋势图 -->
+  <div class="flex-1 flex flex-col" style="min-width:0;">
+    <div class="flex items-center justify-between px-4 py-1.5 border-b" style="border-color:var(--brd);">
+      <span class="text-xs font-semibold uppercase tracking-wider" style="color:var(--mut);">📶 RSSI 趋势图</span>
+      <div class="flex items-center gap-2">
+        <select id="rssi-link-select" onchange="updateRssiChart()" class="text-xs rounded px-2 py-0.5 outline-none" style="background:var(--bg);border:1px solid var(--brd);color:var(--txt);">
+          <option value="">-- 选择链路 --</option>
+        </select>
+        <button onclick="toggleRssiPanel()" class="text-xs" style="color:var(--mut);">▼ 收起</button>
+      </div>
+    </div>
+    <div id="rssi-chart" style="width:100%;height:155px;display:flex;">
+      <div id="rssi-yaxis" style="width:44px;height:100%;position:relative;flex-shrink:0;"></div>
+      <div id="rssi-plot" style="flex:1;height:100%;position:relative;min-width:0;">
+        <div id="rssi-trend-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:1;">
+          <span style="font-size:13px;color:#475569;">选择链路查看 RSSI 趋势</span>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ════════════ CHANNEL CONFIG PANEL ════════════ -->
@@ -280,6 +303,14 @@ function hex(d){return'0x'+d.toString(16).toUpperCase().padStart(2,'0');}
 function hexS(d){return'0x'+d.toString(16).toUpperCase();}
 function meta(d){return NODE_META[d]||{role:'节点',en:'unknown',color:'#6b7280',size:45,cat:3};}
 function rssiColor(v){return v==null?'#6b7280':v>-40?'#22c55e':v>-50?'#84cc16':v>-60?'#eab308':v>-70?'#f97316':'#ef4444';}
+function _mix(a,b,t){const p=(s,o)=>parseInt(s.slice(o,o+2),16);const r1=p(a,1),g1=p(a,3),b1=p(a,5),r2=p(b,1),g2=p(b,3),b2=p(b,5);const m=Math.round;return'#'+[m(r1+(r2-r1)*t),m(g1+(g2-g1)*t),m(b1+(b2-b1)*t)].map(v=>v.toString(16).padStart(2,'0')).join('');}
+function rssiGradient(v){
+  if(v==null)return'#6b7280';
+  const t=Math.max(0,Math.min(1,(v+30)/(-80))); // -30=0, -110=1
+  if(t<0.33)return _mix('#22c55e','#eab308',t/0.33);
+  if(t<0.66)return _mix('#eab308','#f97316',(t-0.33)/0.33);
+  return _mix('#f97316','#ef4444',(t-0.66)/0.34);
+}
 
 // ════════════════════ 全局状态 ════════════════════
 // ── 节点固定坐标（消除力导向抖动）──
@@ -405,6 +436,19 @@ topoChart.on('click',function(params){
   if(params.dataType==='node'&&params.data.id!=='PC'){
     selectedNodeHex=params.data.id;
     switchTab('node',document.querySelector('[data-tab="node"]'));
+  }else if(params.dataType==='edge'){
+    // ★ 点击链路 → 下方 RSSI 趋势图跳转至该链路
+    const a=parseInt(params.data.source,16),b=parseInt(params.data.target,16);
+    const lo=isNaN(a)?params.data.source:(a<b?params.data.source:params.data.target);
+    const hi=isNaN(a)?params.data.target:(a<b?params.data.target:params.data.source);
+    const lk=`${lo}-${hi}`;
+    const sel=document.getElementById('rssi-link-select');
+    if(sel){
+      for(let i=0;i<sel.options.length;i++){
+        if(sel.options[i].value===lk){sel.value=lk;break;}
+      }
+      updateRssiChart();
+    }
   }
 });
 
@@ -417,72 +461,163 @@ function renderTopo(){
   },400);
 }
 
-// ════════════════════ ECharts: RSSI 趋势图 ════════════════════
-const rssiDom=document.getElementById('rssi-chart');
-const rssiChart=echarts.init(rssiDom,'dark');
-rssiChart.setOption({
-  backgroundColor:'transparent',
-  grid:{left:50,right:20,top:15,bottom:25},
-  tooltip:{trigger:'axis',formatter:function(ps){return ps.map(p=>`${p.seriesName}: ${p.value[1]} dBm`).join('<br/>');}},
-  xAxis:{type:'time',axisLabel:{fontSize:9,color:'#64748b'},splitLine:{show:false}},
-  yAxis:{type:'value',name:'RSSI (dBm)',min:-80,max:-30,axisLabel:{fontSize:9,color:'#64748b'},splitLine:{lineStyle:{color:'#1e293b'}}},
-  series:[]
-});
-window.addEventListener('resize',()=>{topoChart.resize();rssiChart.resize();});
+// ════════════════════ SVG: RSSI 趋势图（完全移植上方网络RSSI走势图） ════════════════════
+const RSSI_TREND_MAX=120;  // 2分钟
+const RSSI_FIXED_RANGE=[-110,-30];
+const _RSSI_VB_W=1000,_RSSI_VB_H=155;
+const _RSSI_PAD=3,_RSSI_PLOT_H=_RSSI_VB_H-2*_RSSI_PAD;
+const _RSSI_SLOT=(_RSSI_VB_W-2*_RSSI_PAD)/(RSSI_TREND_MAX-1);
+let _rssiTrendReady=false;
+let rssiTrendBuffer={};
 
-function updateRssiDropdown(){
-  // 实时更新下拉框：从 activeLinks 中提取当前存在的无线链路
-  const sel=document.getElementById('rssi-link-select');
-  if(!sel)return;
-  const curVal=sel.value;
-  // 收集当前所有无线链路（排除 PC-0x10 USB 连接）
-  const currentLinks=new Set();
-  for(const lk in activeLinks){
-    if(lk==='PC-0x10')continue;
-    if(activeLinks[lk].source!=='PC'&&activeLinks[lk].target!=='PC'){
-      currentLinks.add(lk);
-    }
-  }
-  // 检查是否有变化，避免不必要的重建
-  const existingOpts=new Set();
-  for(let i=1;i<sel.options.length;i++)existingOpts.add(sel.options[i].value);
-  if(currentLinks.size===existingOpts.size&&[...currentLinks].every(l=>existingOpts.has(l))){
-    return; // 没变化，跳过
-  }
-  // 重建选项
-  let opts='<option value="">-- 选择链路 --</option>';
-  for(const lk of [...currentLinks].sort()){
-    opts+=`<option value="${lk}">${lk}</option>`;
-  }
-  sel.innerHTML=opts;
-  // 恢复之前的选择（如果该链路仍然存在）
-  if(currentLinks.has(curVal))sel.value=curVal;
+function _initRssiTrendChart(){
+  if(_rssiTrendReady)return;
+  const plot=document.getElementById('rssi-plot');
+  if(!plot)return;
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('width','100%');svg.setAttribute('height','100%');
+  svg.setAttribute('viewBox',`0 0 ${_RSSI_VB_W} ${_RSSI_VB_H}`);
+  svg.setAttribute('preserveAspectRatio','none');
+  svg.style.display='block';
+  let html='';
+  html+=`<g id="rssi-trend-grid"></g>`;
+  html+=`<g id="rssi-trend-line" style="display:none"></g>`;
+  html+=`<line id="rssi-trend-vline" x1="0" y1="0" x2="0" y2="${_RSSI_VB_H}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3" vector-effect="non-scaling-stroke" style="display:none"/>`;
+  html+=`<circle id="rssi-trend-dot" cx="0" cy="0" r="2.5" fill="#a78bfa" stroke="#fff" stroke-width="1" vector-effect="non-scaling-stroke" style="display:none"/>`;
+  html+=`<rect id="rssi-trend-overlay" x="0" y="0" width="${_RSSI_VB_W}" height="${_RSSI_VB_H}" fill="transparent"/>`;
+  svg.innerHTML=html;plot.appendChild(svg);
+
+  const overlay=svg.querySelector('#rssi-trend-overlay');
+  overlay.style.cursor='crosshair';
+  overlay.addEventListener('mousemove',function(e){
+    const data=svg._trendData;
+    if(!data||!data.points||data.points.length<2)return;
+    const rect=svg.getBoundingClientRect();
+    const mx=(e.clientX-rect.left)/rect.width*_RSSI_VB_W;
+    let best=0,minD=Infinity;
+    for(let i=0;i<data.points.length;i++){const d=Math.abs(data.points[i].x-mx);if(d<minD){minD=d;best=i;}}
+    const pt=data.points[best];
+    const vl=svg.querySelector('#rssi-trend-vline');
+    const dt=svg.querySelector('#rssi-trend-dot');
+    if(vl){vl.setAttribute('x1',pt.x);vl.setAttribute('x2',pt.x);vl.style.display='';}
+    if(dt){dt.setAttribute('cx',pt.x);dt.setAttribute('cy',pt.y);dt.setAttribute('fill',rssiGradient(pt.rssi));dt.style.display='';}
+    const t=new Date(pt.time).toLocaleTimeString('zh-CN',{hour12:false});
+    _showRssiTrendTip(e,data.linkName,pt.rssi,t,data.color);
+  });
+  overlay.addEventListener('mouseleave',function(){
+    const vl=svg.querySelector('#rssi-trend-vline');
+    const dt=svg.querySelector('#rssi-trend-dot');
+    if(vl)vl.style.display='none';
+    if(dt)dt.style.display='none';
+    _hideSparkTip();
+  });
+  _rssiTrendReady=true;
+}
+
+function _showRssiTrendTip(e,linkName,rssi,time,color){
+  if(!_sparkTipEl)_sparkTipEl=document.getElementById('spark-tip');
+  if(!_sparkTipEl)return;
+  _sparkTipEl.innerHTML=
+    `<div style="font-weight:700;font-size:13px;color:#f1f5f9;margin-bottom:2px;">📶 ${linkName}</div>`+
+    `<div style="font-size:10px;color:#64748b;margin-bottom:4px;">RSSI 趋势</div>`+
+    `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:6px;vertical-align:middle;"></span><b>${rssi} dBm</b> <span style="color:#94a3b8;">${time}</span>`;
+  _sparkTipEl.style.left='';_sparkTipEl.style.top='';_sparkTipEl.classList.add('show');
+  const tipW=_sparkTipEl.offsetWidth||100,tipH=_sparkTipEl.offsetHeight||24;
+  let left=e.clientX+14,top=e.clientY-tipH-8;
+  if(left+tipW>window.innerWidth-8)left=e.clientX-tipW-14;
+  if(top<8)top=e.clientY+14;
+  _sparkTipEl.style.left=left+'px';_sparkTipEl.style.top=top+'px';
 }
 
 function updateRssiChart(){
-  const now=Date.now();
+  _initRssiTrendChart();
+  const plot=document.getElementById('rssi-plot');
+  const svg=plot?plot.querySelector('svg'):null;if(!svg)return;
+  if(plot.getBoundingClientRect().width<=0)return; // 标签页隐藏时跳过，避免零宽渲染
   const sel=document.getElementById('rssi-link-select');
   const selected=sel?sel.value:'';
-  const ageEl=document.getElementById('rssi-age');
-  if(!selected){if(ageEl)ageEl.style.display='none';return;}
-  const history=linkRssiHistory[selected];
-  if(!history||history.length<2){if(ageEl)ageEl.style.display='none';return;}
-  let data=history.map(p=>[p.time*1000,p.rssi]).filter(p=>p[0]>now-120000&&p[1]!=null);
-  if(data.length<2){if(ageEl)ageEl.style.display='none';return;}
-  // 最后数据点的时间
-  const lastT=data[data.length-1][0];
-  const age=((now-lastT)/1000).toFixed(0);
-  if(ageEl){ageEl.style.display='';ageEl.textContent=`${age}s 前`;}
-  const color=rssiColor(data[data.length-1][1]);
-  rssiChart.setOption({series:[{name:selected,type:'line',data:data,smooth:true,symbol:'none',
-    lineStyle:{color:color,width:2},itemStyle:{color:color}}]},false);
+  const emptyEl=document.getElementById('rssi-trend-empty');
+  const line=svg.querySelector('#rssi-trend-line');
+  const grid=svg.querySelector('#rssi-trend-grid');
+  const yaxis=document.getElementById('rssi-yaxis');
+
+  if(!selected){
+    if(emptyEl){emptyEl.style.display='';emptyEl.querySelector('span').textContent='选择链路查看 RSSI 趋势';}
+    if(line)line.style.display='none';
+    const vl=svg.querySelector('#rssi-trend-vline');if(vl)vl.style.display='none';
+    const dt=svg.querySelector('#rssi-trend-dot');if(dt)dt.style.display='none';
+    if(grid)grid.innerHTML='';if(yaxis)yaxis.innerHTML='';
+    svg._trendData=null;return;
+  }
+
+  const buf=rssiTrendBuffer[selected]||[];
+  if(buf.length<2){
+    if(emptyEl){emptyEl.style.display='';emptyEl.querySelector('span').textContent=buf.length===0?'暂无数据':'数据采集中...';}
+    if(line)line.style.display='none';
+    const vl=svg.querySelector('#rssi-trend-vline');if(vl)vl.style.display='none';
+    const dt=svg.querySelector('#rssi-trend-dot');if(dt)dt.style.display='none';
+    if(grid)grid.innerHTML='';if(yaxis)yaxis.innerHTML='';
+    svg._trendData=null;return;
+  }
+
+  let points=buf.slice(-RSSI_TREND_MAX);const N=points.length;
+
+  const vals=points.map(p=>p.v);
+  let yMin=Math.min(...vals),yMax=Math.max(...vals);
+  yMin=Math.min(yMin,RSSI_FIXED_RANGE[0]);yMax=Math.max(yMax,RSSI_FIXED_RANGE[1]);
+  if(yMin===yMax){yMin-=0.5;yMax+=0.5;}
+
+  // ★ X 坐标：时间映射（离线期间的空白直接体现在 X 间距上）
+  const now=Date.now();
+  const tMin=now-120000,tMax=now,tRange=tMax-tMin||1;
+  const tx=t=>_RSSI_PAD+(t-tMin)/tRange*(_RSSI_VB_W-2*_RSSI_PAD);
+  const xs=points.map(p=>tx(p.t));
+  const ys=vals.map(v=>_RSSI_PAD+_RSSI_PLOT_H-(v-yMin)/(yMax-yMin)*_RSSI_PLOT_H);
+
+  // ★ 逐段生成 <line>，每段独立着色；断线区间跳过
+  let coordPoints=[],segmentsHtml='';
+  const GAP_MS=5000;
+  for(let i=1;i<N;i++){
+    if(points[i].t-points[i-1].t>GAP_MS)continue;
+    const x1=xs[i-1],y1=ys[i-1],x2=xs[i],y2=ys[i];
+    const segColor=rssiGradient((points[i-1].v+points[i].v)/2);
+    segmentsHtml+=`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${segColor}" stroke-width="2" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  }
+  for(let i=0;i<N;i++)coordPoints.push({x:xs[i],y:ys[i],time:points[i].t,rssi:points[i].v});
+
+  const avgRssi=vals.reduce((s,v)=>s+v,0)/vals.length;
+  const color=rssiColor(avgRssi);
+
+  if(yaxis){const steps=5;let yhtml='';for(let i=0;i<steps;i++){const rssi=yMin+(yMax-yMin)*i/(steps-1);const yPx=_RSSI_PAD+_RSSI_PLOT_H-(rssi-yMin)/(yMax-yMin)*_RSSI_PLOT_H;const yTop=(yPx/_RSSI_VB_H*100).toFixed(1);yhtml+=`<span style="position:absolute;right:8px;top:${yTop}%;transform:translateY(-50%);font-size:10px;color:#64748b;line-height:1;white-space:nowrap;">${rssi.toFixed(0)}</span>`;}yaxis.innerHTML=yhtml;}
+
+  if(grid){const steps=5;let ghtml='';for(let i=0;i<steps;i++){const y=_RSSI_PAD+_RSSI_PLOT_H-(i/(steps-1))*_RSSI_PLOT_H;ghtml+=`<line x1="${_RSSI_PAD}" y1="${y.toFixed(1)}" x2="${_RSSI_VB_W-_RSSI_PAD}" y2="${y.toFixed(1)}" stroke="#1e293b" stroke-width="0.5" vector-effect="non-scaling-stroke"/>`;}grid.innerHTML=ghtml;}
+
+  if(emptyEl)emptyEl.style.display='none';
+  if(line){line.innerHTML=segmentsHtml;line.style.display='';}
+  const dt=svg.querySelector('#rssi-trend-dot');if(dt)dt.setAttribute('fill',color);
+  svg._trendData={points:coordPoints,linkName:selected,color};
+}
+window.addEventListener('resize',()=>{topoChart.resize();});
+
+setInterval(function(){updateRssiChart();},1000);
+
+function updateRssiDropdown(){
+  const sel=document.getElementById('rssi-link-select');if(!sel)return;
+  const curVal=sel.value;
+  const currentLinks=new Set();
+  for(const lk in activeLinks){if(lk==='PC-0x10')continue;if(activeLinks[lk].source!=='PC'&&activeLinks[lk].target!=='PC')currentLinks.add(lk);}
+  const existingOpts=new Set();for(let i=1;i<sel.options.length;i++)existingOpts.add(sel.options[i].value);
+  if(currentLinks.size===existingOpts.size&&[...currentLinks].every(l=>existingOpts.has(l)))return;
+  let opts='<option value="">-- 选择链路 --</option>';
+  for(const lk of [...currentLinks].sort())opts+=`<option value="${lk}">${lk}</option>`;
+  sel.innerHTML=opts;if(currentLinks.has(curVal))sel.value=curVal;
 }
 
 function toggleRssiPanel(){
-  const p=document.getElementById('rssi-panel');
+  const p=document.getElementById('bottom-panel');
   const btn=p.querySelector('button');
   if(p.style.height!=='36px'){p.style.height='36px';btn.textContent='▶ 展开';}
-  else{p.style.height='190px';btn.textContent='▼ 收起';rssiChart.resize();}
+  else{p.style.height='190px';btn.textContent='▼ 收起';}
 }
 
 // ════════════════════ 统计仪表盘 ════════════════════
@@ -1273,7 +1408,6 @@ function updateTopology(src,dest,msgType,pathId,count,stamps,relays,lastHopRssi)
   if(msgType===MSG_RREQ){for(let k in activeLinks)activeLinks[k].inRoute=false;}
   updatePhaseIndicator(msgType===MSG_RREQ?'rreq':msgType===MSG_RREP?'rrep':msgType===MSG_DATA?'data':msgType===MSG_ACK?'ack':msgType===MSG_ACK_CONFIRM?'ack_done':'idle');
   renderTopo();
-  updateRssiChart();
   updateLinkStatsIfActive();
 }
 
@@ -1485,85 +1619,6 @@ function setLogFilter(f,btn){
   renderLogs();
 }
 
-// ★ 导出日志（增强版：含完整网络状态快照）
-async function exportLogs(){
-  const all=logEntries.slice(0).reverse();
-  const gs=_msgGridState;
-  let text='═══════════════════════════════════════\n';
-  text+='  通信系统综合诊断报告\n';
-  text+='  导出: '+new Date().toLocaleString('zh-CN')+'\n';
-  text+='═══════════════════════════════════════\n\n';
-
-  text+='── 信道 ──\n';
-  text+='  当前: '+currentFreq+'MHz SF'+currentSf+'\n';
-  text+='  串口: '+(isSerialOpen?'已打开':'已关闭')+'  后端: '+(lastStats.serialRunning?'运行中':'未运行')+'\n\n';
-
-  text+='── 统计概览 ──\n';
-  const ls=lastStats;
-  text+='  总帧数: '+(ls.totalFrames||0)+'  RREQ: '+(ls.rreqCount||0)+'  RREP: '+(ls.rrepCount||0)+'  DATA: '+(ls.dataCount||0)+'  ACK: '+(ls.ackCount||0)+'  坏帧: '+(ls.badFrames||0)+'\n';
-  text+='  成功率: '+(ls.successRate!=null?ls.successRate+'%':'--')+'  平均RSSI: '+(ls.avgRssi!=null?ls.avgRssi+' dBm':'--')+'\n';
-  text+='  速率: ↑'+(ls.upRate||0)+' ↓'+(ls.downRate||0)+' B/s\n';
-  text+='  活跃链路: '+Object.keys(activeLinks).length+'  在线节点: '+(ls.onlineNodes||'?')+'/'+(ls.totalNodes||'?')+'\n';
-  text+='  通信阶段: '+(ls.currentPhase||'idle')+'  当前路由: '+(currentRoute||'无')+'\n\n';
-
-  text+='── 拓扑节点 ──\n';
-  const nodes=Object.values(activeNodes);
-  nodes.forEach(n=>{
-    const role=n.id==='PC'?'网关':(NODE_META[n.decId]?NODE_META[n.decId].role:'节点');
-    const status=n.stale?' ⚠离线':' ✅在线';
-    const seen=n.lastSeen?Math.round((Date.now()-n.lastSeen)/1000)+'s前':'--';
-    text+=`  ${n.id} [${role}]${status}  最后活跃: ${seen}\n`;
-  });
-
-  text+='\n── 活跃链路详情 ──\n';
-  const lkKeys=Object.keys(activeLinks);
-  if(lkKeys.length>0){
-    lkKeys.forEach(lk=>{
-      const l=activeLinks[lk];const r=l.rssi!=null?l.rssi+' dBm':'--';
-      text+=`  ${lk}  RSSI: ${r}  ${l.broken?'⚠断开 ':''}${l.inRoute?'★路由 ':''}${l.lineType==='dashed'?'(闲置)':'(活跃)'}\n`;
-    });
-  }else{text+='  (无)\n';}
-
-  text+='\n── 白名单 ──\n';
-  text+='  节点数: '+_wlEntries.length+'\n';
-  _wlEntries.forEach(e=>{
-    text+=`  0x${e.nodeId.toString(16).toUpperCase()}  role=${e.role==='1'?'relay':'sender'}${e.kicked?' ⛔已踢出':''}\n`;
-  });
-
-  text+='\n── 节点运行时状态 ──\n';
-  const nsKeys=Object.keys(nodeStatuses);
-  if(nsKeys.length>0){
-    nsKeys.forEach(k=>{
-      const s=nodeStatuses[k];
-      text+=`  ${k}: 运行${s.uptime||0}s  空闲RAM:${s.freeRAM||0}B  TX:${s.txPkts||0}  RX:${s.rxPkts||0}`;
-      if(s.freq)text+=`  频率:${s.freq}MHz SF${s.sf}`;
-      text+=`  更新:${Math.round((Date.now()-s.updated)/1000)}s前\n`;
-    });
-  }else{text+='  (无节点状态数据)\n';}
-
-  text+='\n── 消息流网格 ──\n';
-  text+='  列×行: '+gs.cols+'×'+gs.rows+'  已填: '+gs.cells.filter(c=>c!==null).length+'/'+gs.cells.length+'\n';
-  text+='  fillPtr: '+gs.fillPtr+'  processed: '+gs.processed+'  shifting: '+gs._shifting+'  busy: '+gs._busy+'\n';
-
-  text+='\n───────────────────────────────────────\n';
-  text+='  日志流 ('+logEntries.length+' 条)\n';
-  text+='───────────────────────────────────────\n\n';
-  for(const e of all){
-    const t=new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
-    text+='['+e.title+'] '+t+'\n'+e.detail.replace(/<[^>]*>/g,'')+'\n\n';
-  }
-  // 浏览器下载
-  const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='comm-log-'+new Date().toISOString().slice(0,19).replace(/:/g,'-')+'.txt';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  // 同步保存至服务器 log/ 文件夹
-  // 同步保存至服务器 log/ 文件夹
-  try{const r=await fetch('/api/save_log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text})});const j=await r.json();if(j.status==='ok'){addLog('SYS','导出','📥 已保存至 log/'+j.file+' ('+logEntries.length+' 条)','#22c55e');return;}}catch(e){}
-  addLog('SYS','导出','📥 浏览器下载 ('+logEntries.length+' 条)','#22c55e');
-}
 
 // ════════════════════ 信道面板 ════════════════════
 function showChannelPanel(){const p=document.getElementById('channel-panel');p.style.display='flex';requestAnimationFrame(()=>{p.style.transform='translateX(0)';});}
@@ -1764,6 +1819,8 @@ function clearFrontendState(keepLogs){
     logEntries=[];logSeq=0;lastLogSeq=-1;
     const logContainer=document.getElementById('log-container');if(logContainer)logContainer.innerHTML='';
   }
+  // 传感器面板常驻，仅重置时间戳
+  _lastSensorTime=0;
   // 重渲染
   renderTopo();updateRssiChart();
 }
@@ -1818,7 +1875,7 @@ setInterval(()=>{
 },4000);
 
 // ════════════════════ WebSocket ════════════════════
-let isSerialOpen=false,_uiFrozen=true,_manualClose=false,globalWs=null;
+let isSerialOpen=false,_uiFrozen=true,_manualClose=false,globalWs=null,_lastSensorTime=0;
 
 function toggleSerial(){
   const port=document.getElementById('port-select').value,baud=document.getElementById('baud-select').value,btn=document.getElementById('btn-serial');
@@ -1914,12 +1971,32 @@ function connectWS(){
       // ★ 周期 stats 不触发路由高亮（高亮仅由 ACK_CONFIRM 触发）
       if(d.data.currentRoute){currentRoute=d.data.currentRoute;}
       if(d.data.currentPhase)updatePhaseIndicator(d.data.currentPhase);
-      if(d.data.rssiHistory){for(let lk in d.data.rssiHistory){if(!linkRssiHistory[lk])linkRssiHistory[lk]=[];d.data.rssiHistory[lk].forEach(p=>{if(!linkRssiHistory[lk].find(x=>Math.abs(x.time-p.t)<0.1))linkRssiHistory[lk].push({time:p.t,rssi:p.rssi});});if(linkRssiHistory[lk].length>120)linkRssiHistory[lk]=linkRssiHistory[lk].slice(-120);}updateRssiChart();}
+      if(d.data.rssiHistory){for(let lk in d.data.rssiHistory){if(!linkRssiHistory[lk])linkRssiHistory[lk]=[];d.data.rssiHistory[lk].forEach(p=>{if(!linkRssiHistory[lk].find(x=>Math.abs(x.time-p.t)<0.1))linkRssiHistory[lk].push({time:p.t,rssi:p.rssi});});if(linkRssiHistory[lk].length>120)linkRssiHistory[lk]=linkRssiHistory[lk].slice(-120);}}
+      // ★ RSSI 趋势图数据推送：用 WebSocket 的 linkRssi（~1/s，不受后台标签页节流影响）
+      if(d.data.linkRssi){for(const lk in d.data.linkRssi){const v=d.data.linkRssi[lk];if(v!=null&&!(activeLinks[lk]&&activeLinks[lk].broken)){if(!rssiTrendBuffer[lk])rssiTrendBuffer[lk]=[];rssiTrendBuffer[lk].push({v:v,t:Date.now()});if(rssiTrendBuffer[lk].length>RSSI_TREND_MAX)rssiTrendBuffer[lk].splice(0,rssiTrendBuffer[lk].length-RSSI_TREND_MAX);}}}
       }
       return;
     }
     if(d.type==='cmd_ack'){
       addLog('SYS','CMD_ACK',`0x${d.node.toString(16).toUpperCase()} 配置${d.status===0?'成功':'失败'} (status=${d.status})`,d.status===0?'#22c55e':'#ef4444');
+      return;
+    }
+    // ★ 传感器数据更新
+    if(d.type==='sensor_data'){
+      const dhtOk=!!(d.alerts&0x10);  // bit4: DHT 有效
+      const setVal=(id,val,color)=>{const el=document.getElementById(id);if(el){el.textContent=val;if(color)el.style.color=color;}};
+      setVal('sd-temp',dhtOk?d.temperature:'--',d.temperature>35?'#ef4444':d.temperature>30?'#f59e0b':'#f97316');
+      setVal('sd-hum',dhtOk?d.humidity:'--',d.humidity>80?'#ef4444':d.humidity>60?'#f59e0b':'#0ea5e9');
+      const pct=Math.round(d.pot*100/1023);
+      setVal('sd-light',pct,pct<20?'#ef4444':pct<40?'#f59e0b':'#eab308');
+      _lastSensorTime=Date.now();
+      const elAlert=document.getElementById('sd-alert');
+      if(elAlert){
+        const parts=[];if(!dhtOk)parts.push('温湿度离线');
+        if(d.alerts&0x01)parts.push('高温');if(d.alerts&0x02)parts.push('高湿');if(d.alerts&0x04)parts.push('电位低');
+        if(parts.length){elAlert.classList.remove('hidden');elAlert.textContent='⚠ '+parts.join(' · ');}
+        else{elAlert.classList.add('hidden');}
+      }
       return;
     }
     // ★ 两阶段提交进度
@@ -2097,6 +2174,18 @@ function connectWS(){
       wlRender();
       return;
     }
+    if(d.type==='route_decision'){
+      // ★ mainTerm 路由决策 → 格式化显示瓶颈对比
+      const rd=d.text||'';
+      const mWin=rd.match(/pathId=(\d+)\s+win=([\w,]+)\s+b=(\d+)/);
+      const mCmp=rd.match(/([><]=?)dir/);
+      if(mWin){
+        const pid=mWin[1], path=mWin[2], b=mWin[3];
+        const cmp=mCmp?(' '+mCmp[0].replace('dir','直达')):'';
+        addLog('RREQ','路由选择',`pathId=${pid} → ${path==='direct'?'直达':'经 '+path.replace(/,/g,'→')} | 瓶颈=${b}dBm`+cmp,'#22d3ee');
+      }else{addLog('RREQ','路由',rd,'#22d3ee');}
+      return;
+    }
     if(d.type==='text_log'){
       // 仅在组网完成后显示串口文本日志
       if(networkReady){addLog('SYS','串口',d.text,'#0ea5e9');}
@@ -2121,6 +2210,7 @@ function connectWS(){
       if(d.relays&&d.relays.length===0&&d.msgType===MSG_RREP){detail+=`<br/>🛤 路径: <b style="color:var(--green);">★ 直达 DIRECT</b>`;}
       if(d._retry){detail+=`<br/>🔄 重传: <b style="color:#ef4444;">第 ${d._retry} 次发送</b>`;}
       detail+=`<br/><span style="color:var(--mut);font-size:10px;">data: ${d.dataHex}</span>`;
+      if(d.sensor){const s=d.sensor;detail+=`<br/>温度 <b style="color:#f97316;">${s.temperature}°C</b> 湿度 <b style="color:#0ea5e9;">${s.humidity}%</b> 电位 <b style="color:#eab308;">${Math.round(s.pot*100/1023)}%</b>`;if(s.alerts){const ap=[];if(s.alerts&0x01)ap.push('高温');if(s.alerts&0x02)ap.push('高湿');if(s.alerts&0x04)ap.push('电位低');detail+=`<br/>⚠ <span style="color:#fca5a5;">${ap.join(', ')}</span>`;}}
       const logTitle=m[0]+' '+m[1]+(d._retry?' (重传#'+d._retry+')':'');
       addLog(m[0],logTitle,detail,m[2],d.stats?d.stats.totalFrames:null);
       if(!_uiFrozen){
@@ -2137,8 +2227,10 @@ function connectWS(){
 // ════════════════════ 启动 ════════════════════
 connectWS();
 updateStats({upRate:0,downRate:0,onlineNodes:0,totalNodes:0,activeLinks:0,msgTypeHistory:[],successRate:null,avgRssi:null});
-// 初始更新 RSSI 图
-setInterval(updateRssiChart,5000);
+// ★ 标签页切回时强制重绘 RSSI 趋势图（后台时 SVG 渲染可能丢失）
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)updateRssiChart();});
+// ★ 传感器时间刷新
+setInterval(()=>{const el=document.getElementById('sd-time');if(el&&_lastSensorTime>0){const s=Math.round((Date.now()-_lastSensorTime)/1000);el.textContent=(s<60?s+'s':Math.floor(s/60)+'m')+'前';}},1000);
 </script>
 <div id="msg-popup" class="msg-popup"></div>
 <div id="spark-tip" class="spark-tip"></div>

@@ -55,6 +55,15 @@ RouteEntry route = { DEST_ID, 0, {0,0}, 0, 0, false };
 
 uint8_t  pathIdCounter = 0;
 uint8_t  sampleCounter = 0;
+// ── 传感器缓存 (D3=DHT22, A0=电位器, D2=红外) ──
+int8_t   gTemp   = 0;     // 温度 °C
+uint8_t  gHum    = 0;     // 湿度 %
+uint16_t gPot    = 0;     // 电位 ADC (0-1023)
+uint8_t  gIrTrig = 0;     // 红外触发标志
+uint8_t  gAlerts = 0;     // 告警位: bit0=高温 bit1=高湿 bit2=电位低 bit3=红外 bit4=DHT有效
+bool     gDhtValid = false; // DHT 读取成功标志
+uint32_t gLastSensor = 0;
+uint32_t gLastIrTrig  = 0;
 bool     dataPending   = false;
 uint8_t  rreqRetryCount = 0;      // RREQ 当前路径重试计数
 // ★ 已知中继追踪：记住上一轮成功通信的中继，本轮若缺失则重试 RREQ
@@ -102,7 +111,57 @@ int freeMemory() {
   return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
 }
 
-// (sendNodeStatus removed — merged into sendHeartbeat)
+// ── DHT 手动读取 (D3, 约 25ms, 零依赖) ──
+//    ★ 全程关中断 — 防 LoRa 在任何阶段干扰时序
+// ── DHT 手动读取 (D3, 约 25ms, 零依赖) ──
+bool readDHT22(int8_t* temp, uint8_t* hum) {
+  uint8_t data[5] = {0,0,0,0,0};
+  pinMode(3, OUTPUT);
+  digitalWrite(3, LOW);
+  delayMicroseconds(16000); delayMicroseconds(2000);  // 18ms
+  digitalWrite(3, HIGH);
+  delayMicroseconds(40);
+  pinMode(3, INPUT_PULLUP);
+  delayMicroseconds(10);
+  // 等待 DHT 响应
+  unsigned long t0 = micros();
+  while (digitalRead(3) == HIGH) { if (micros() - t0 > 200) return false; }
+  t0 = micros();
+  while (digitalRead(3) == LOW)  { if (micros() - t0 > 200) return false; }
+  t0 = micros();
+  while (digitalRead(3) == HIGH) { if (micros() - t0 > 200) return false; }
+  // 40-bit 读取
+  for (int i = 0; i < 40; i++) {
+    t0 = micros();
+    while (digitalRead(3) == LOW)  { if (micros() - t0 > 150) return false; }
+    t0 = micros();
+    while (digitalRead(3) == HIGH) { if (micros() - t0 > 150) return false; }
+    data[i / 8] <<= 1;
+    if ((micros() - t0) > 50) data[i / 8] |= 1;
+  }
+  pinMode(3, OUTPUT); digitalWrite(3, HIGH);
+  if ((data[0] + data[1] + data[2] + data[3]) != data[4]) return false;
+  *hum = data[0];
+  *temp = (data[2] & 0x80) ? -(int8_t)(data[2] & 0x7F) : (int8_t)data[2];
+  return true;
+}
+
+// ── 读取全部传感器并更新缓存 (需要时调用, DHT 最小间隔 2.5s) ──
+void readSensors() {
+  if (millis() - gLastSensor < 2500) return;
+  gLastSensor = millis();
+  int8_t t; uint8_t h;
+  if (readDHT22(&t, &h)) { gTemp = t; gHum = h; gDhtValid = true; }
+  gPot  = 1023 - analogRead(A0);  // 顺时针=大
+  gIrTrig = (digitalRead(2) == LOW) ? 1 : 0;
+  gAlerts = 0;
+  if (gDhtValid)     gAlerts |= 0x10;
+  if (gTemp > 35)    gAlerts |= 0x01;
+  if (gHum > 80)     gAlerts |= 0x02;
+  if (gPot < 200)  gAlerts |= 0x04;
+  if (gIrTrig)       gAlerts |= 0x08;
+}
+
 // =============================================
 void setup() {
   // LoRa.setPins(A3);
@@ -177,6 +236,13 @@ void loop() {
   uint32_t now = millis();
 
   if (discState == IDLE) {
+    // ★ 红外触发即时上报：检测到入侵 → 刷新周期，不等 10s
+    if (gIrTrig && (now - gLastIrTrig > 5000) && (now - lastAction > 3000)) {
+      gLastIrTrig = now;
+      lastAction = 0;  // 强制触发下一轮通信
+      Serial.println(F("\n⚠ IR triggered — immediate report"));
+    }
+
     if (now - lastAction >= 10000) {
       lastAction = now;
       rreqRetryCount = 0;  // ★ 新周期开始，重置重试计数
@@ -625,6 +691,7 @@ void handleACKFrame(LoRaFrame* frame) {
 
 // =============================================
 void sendData() {
+  readSensors();  // ★ 发送前读取最新传感器数据
   LoRaFrame frame;
   memset(&frame, 0, FRAME_SIZE);
 
@@ -639,8 +706,13 @@ void sendData() {
   memcpy(frame.data, route.relays, route.relayCount);
 
   uint8_t off = route.relayCount;
-  frame.data[off]     = sampleCounter++;
-  frame.data[off + 1] = 0xAB;
+  // ★ 传感器数据编码 (5 字节, 确保 off+4 < 8 → off≤3, relayCount≤2 满足)
+  frame.data[off]     = (uint8_t)(int8_t)gTemp;           // 温度 int8 °C
+  frame.data[off + 1] = gHum;                             // 湿度 uint8 %
+  frame.data[off + 2] = (gPot >> 8) & 0xFF;             // 电位高字节
+  frame.data[off + 3] = gPot & 0xFF;                    // 电位低字节
+  frame.data[off + 4] = gAlerts;                          // 告警位
+  sampleCounter++;  // 仍递增用于统计
 
   calcChecksum(&frame);
 
@@ -648,8 +720,11 @@ void sendData() {
   LoRa.write((uint8_t*)&frame, FRAME_SIZE);
   LoRa.endPacket(); txPacketCount++;
 
-  Serial.print(F("DATA tx ctr="));
-  Serial.print(sampleCounter - 1, DEC);
+  Serial.print(F("DATA tx T="));
+  Serial.print(gTemp, DEC);
+  Serial.print(F(" H=")); Serial.print(gHum, DEC);
+  Serial.print(F("% L=")); Serial.print(gPot, DEC);
+  if (gIrTrig) Serial.print(F(" ⚠IR"));
   Serial.print(F(" via="));
   Serial.println(route.relayCount, DEC);
 

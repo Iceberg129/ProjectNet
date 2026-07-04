@@ -1,7 +1,8 @@
 import asyncio, struct, serial, serial.tools.list_ports, threading, json, time, os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from collections import defaultdict, deque
 
 # ════════════════════ 帧格式常量 ════════════════════
@@ -81,13 +82,17 @@ class StatsTracker:
         self._cycle_history = deque(maxlen=10)  # 最近 10 轮通信结果 True=成功
         self._msg_type_history = []  # 消息类型历史（不设上限，前端网格只取最近40条）
         self._pending_events = []           # 待广播的事件列表
+        self._reported_broken = set()       # 已上报过断开的链路（去重）
+        self._reported_offline = set()      # 已上报过离线的节点（去重）
+        self._last_route_decision = ""      # mainTerm 最近一次路由决策
 
     def _link_key(self, a: int, b: int) -> str:
         lo, hi = (a, b) if a < b else (b, a)
         return f"0x{lo:02X}-0x{hi:02X}"
 
     def record_frame(self, src: int, dest: int, msg_type: int,
-                     path_id: int, count: int, stamps: list, relays: list):
+                     path_id: int, count: int, stamps: list, relays: list,
+                     last_hop_rssi=None):
         self.total_frames += 1
         now = time.time()
         # ★ 上传/下载速率：每帧 16 字节
@@ -140,6 +145,7 @@ class StatsTracker:
                 self._link_fail_count[key] = 0
                 self._known_links.add(key)
                 if was_broken:
+                    self._reported_broken.discard(key)
                     self._pending_events.append({
                         "type": "link_restored",
                         "linkKey": key,
@@ -156,11 +162,16 @@ class StatsTracker:
                     self._current_rreq_nodes.add(rid)
                     self._current_rreq_links.add(key)
                     self._online_nodes.add(rid)  # 能转发 RREQ = 确认在线
+                    self._reported_offline.discard(rid)  # 恢复后允许下次离线再报
                 prev = rid
             # 最终跳 → dest（也追踪链路，写入 _known_links 作为全量基准）
             if prev != dest:
                 key = self._link_key(prev, dest)
-                self.rssi_history[key].append((now, None))
+                final_rssi = last_hop_rssi if last_hop_rssi is not None else None
+                self.rssi_history[key].append((now, final_rssi))
+                if final_rssi is not None:
+                    self.link_rssi[key] = final_rssi
+                    self._link_last_update[key] = now
                 self._known_links.add(key)
                 self._link_fail_count[key] = 0
                 if msg_type == MSG_RREQ:
@@ -229,7 +240,8 @@ class StatsTracker:
                 for lk in missing:
                     cnt = self._link_fail_count.get(lk, 0) + 1
                     self._link_fail_count[lk] = cnt
-                    if cnt >= self._LINK_FAIL_THRESHOLD:
+                    if cnt >= self._LINK_FAIL_THRESHOLD and lk not in self._reported_broken:
+                        self._reported_broken.add(lk)
                         self._pending_events.append({
                             "type": "link_broken",
                             "linkKey": lk,
@@ -251,14 +263,16 @@ class StatsTracker:
                     )
                     if all_broken:
                         self._online_nodes.discard(nid)  # ★ 同步在线集合
-                        role = NODE_ROLES.get(nid, {}).get("role", "未知")
-                        self._pending_events.append({
-                            "type": "node_offline",
-                            "nodeId": nid,
-                            "nodeHex": node_hex,
-                            "role": role,
-                            "msg": f"所有链路({len(node_links)}条)均不可达，判定离线"
-                        })
+                        if nid not in self._reported_offline:
+                            self._reported_offline.add(nid)
+                            role = NODE_ROLES.get(nid, {}).get("role", "未知")
+                            self._pending_events.append({
+                                "type": "node_offline",
+                                "nodeId": nid,
+                                "nodeHex": node_hex,
+                                "role": role,
+                                "msg": f"所有链路({len(node_links)}条)均不可达，判定离线"
+                            })
 
     def _finalize_cycle(self, success: bool):
         """周期结束时调用：统一计入 attempts（和 successes）"""
@@ -449,23 +463,6 @@ def get_stats():
 def reset_stats():
     stats.reset(); return {"status":"ok","msg":"统计已重置"}
 
-LOG_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "log")
-os.makedirs(LOG_SAVE_DIR, exist_ok=True)
-
-@app.post("/api/save_log")
-async def save_log(request: Request):
-    try:
-        data = await request.json()
-        content = data.get("content", "")
-        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        filename = f"diagnostic-{ts}.txt"
-        filepath = os.path.join(LOG_SAVE_DIR, filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(content)
-        return {"status": "ok", "file": filename}
-    except Exception as e:
-        return {"status": "error", "msg": str(e)}
-
 @app.get("/api/nodes")
 def get_nodes():
     return {"nodes": {f"0x{k:02X}": stats.get_node_details(k) for k in stats.node_stats}}
@@ -492,6 +489,7 @@ _TEXT_LOG_KEYWORDS = [
     "MISS", "RETRY",  # sender 缺失中继重试日志
     "WL", "WHITELIST",  # 白名单管理
     "KICKED", "UNKICKED",  # 踢出/恢复通知
+    "WIN", "PATHID", "BOTTLENECK", "DIRECT", "CANDIDATE",  # mainTerm 路由决策
 ]
 
 
@@ -589,6 +587,15 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                             "sf": sf,
                                         })), loop)
                                 except: pass
+                            elif line.startswith("pathId=") or line.startswith("  pathId="):
+                                # ★ mainTerm 路由决策行
+                                try:
+                                    line_clean = line.strip()
+                                    stats._last_route_decision = line_clean
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type":"route_decision","text":line_clean,"time":time.time()
+                                    })), loop)
+                                except: pass
                             elif line and _is_useful_log(line):
                                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
                                     "type":"text_log","text":line,"time":time.time()
@@ -636,6 +643,7 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                     })), loop)
                                 del buffer[:FRAME_SIZE]
                                 continue
+                            last_hop = None
                             if msg_type == MSG_RREQ:
                                 for i in range(min(count, 4)):
                                     rid, r = data_bytes[i*2], to_int8(data_bytes[i*2+1])
@@ -645,10 +653,34 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                             elif msg_type in (MSG_RREP, MSG_DATA, MSG_ACK, MSG_ACK_CONFIRM):
                                 for i in range(min(count, 8)):
                                     if data_bytes[i]: relays.append(data_bytes[i])
-                                # RREP/ACK/ACK_CONFIRM: data[7] 无真实 RSSI；只有 DATA 有
-                                if msg_type == MSG_DATA and count < 4:
-                                    last_hop = to_int8(data_bytes[7])
-                            stats.record_frame(src, dest, msg_type, path_id, count, stamps, relays)
+                                if count < 4:
+                                    last_hop = to_int8(data_bytes[7])  # 所有帧 mainTerm 都写了 data[7]
+                            stats.record_frame(src, dest, msg_type, path_id, count, stamps, relays, last_hop)
+                            # ★ 帧日志（跳过 HB，太频繁无意义）
+                            if msg_type != MSG_HEARTBEAT:
+                                try:
+                                    ts = time.strftime("%H:%M:%S")
+                                    name = MSG_NAMES.get(msg_type, "?")
+                                    src_h = f"0x{src:02X}"; dst_h = f"0x{dest:02X}"
+                                    parts = []
+                                    if stamps:
+                                        parts.append("RSSI:" + " ".join([f"{s['id']}={s['rssi']}dBm" for s in stamps]))
+                                    if relays:
+                                        parts.append("路径:" + "→".join([f"0x{r:02X}" for r in relays]))
+                                    elif msg_type in (MSG_RREP, MSG_DATA, MSG_ACK) and not relays:
+                                        parts.append("直达")
+                                    if msg_type == MSG_DATA:
+                                        try:
+                                            off = count
+                                            if off + 4 < 8:
+                                                t = to_int8(data_bytes[off])
+                                                h = data_bytes[off+1]
+                                                p = round(((data_bytes[off+2]<<8)|data_bytes[off+3])*100/1023)
+                                                parts.append(f"温{t}℃ 湿{h}% 电位{p}%")
+                                        except: pass
+                                    detail = "  ".join(parts) if parts else ""
+                                    _append_log(f"  {ts} | [{name}] {src_h}→{dst_h}  {detail}".strip())
+                                except: pass
                             # ★ 广播由 record_frame 产生的待处理事件（如离线检测）
                             for evt in stats.get_pending_events():
                                 asyncio.run_coroutine_threadsafe(
@@ -686,7 +718,9 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                     if nbr_id != 0 and nbr_rssi is not None:
                                         lo, hi = (src, nbr_id) if src < nbr_id else (nbr_id, src)
                                         key = f"0x{lo:02X}-0x{hi:02X}"
-                                        stats.link_rssi[key] = nbr_rssi
+                                        # ★ HB RSSI 不覆盖本周期 RREQ 已刷新的链路（避免偷听弱信号污染趋势图）
+                                        if key not in stats._current_rreq_links:
+                                            stats.link_rssi[key] = nbr_rssi
                                         stats._link_last_update[key] = time.time()
                                         stats.rssi_history[key].append((time.time(), nbr_rssi))
                                         # ★ HB 证明链路物理存活 → 重置失败计数 + 标记本周期已刷新
@@ -696,6 +730,7 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                                             stats._link_fail_count[key] = 0
                                             stats._current_rreq_links.add(key)
                                             if was_broken:
+                                                stats._reported_broken.discard(key)
                                                 asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
                                                     "type": "link_restored",
                                                     "linkKey": key,
@@ -715,6 +750,26 @@ def read_serial_thread(port_name: str, baudrate: int, loop):
                             }
                             if last_hop is not None:
                                 frame_msg["lastHopRssi"] = last_hop
+                            # ★ 传感器数据提取（DATA 帧 payload: T 1B + H 1B + L 2B + alerts 1B）
+                            if msg_type == MSG_DATA and count + 4 < 8:
+                                try:
+                                    off = count  # payload 起始偏移
+                                    sensor = {
+                                        "temperature": to_int8(data_bytes[off]),
+                                        "humidity": data_bytes[off + 1],
+                                        "pot": (data_bytes[off + 2] << 8) | data_bytes[off + 3],
+                                        "alerts": data_bytes[off + 4],
+                                    }
+                                    frame_msg["sensor"] = sensor
+                                    # ★ 同时广播独立 sensor_data 事件（供前端面板使用）
+                                    asyncio.run_coroutine_threadsafe(manager.broadcast(json.dumps({
+                                        "type": "sensor_data",
+                                        "nodeId": src,
+                                        "nodeHex": f"0x{src:02X}",
+                                        **sensor,
+                                    })), loop)
+                                except Exception:
+                                    pass
                             # ★ 切换结果帧不广播原始帧（已有 channel_switch_result 专用事件）
                             #    告警帧（is_hb_alert）也不广播——避免前端日志重复显示 HB
                             is_commit_result = (msg_type == MSG_CMD_COMMIT and data_bytes[0] == 0x01)
@@ -858,68 +913,124 @@ PHASE_TIMEOUTS = {
     "ack":  4.0,   # ACK: 3 次重传 × 800ms ≈ 2.4s，4s 起检
 }
 # ════════════════════ 诊断日志 ════════════════════
-LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "log")
+os.makedirs(LOG_DIR, exist_ok=True)
 _diag_counter = 0
+_last_log_frames = -1   # 上次写入时的总帧数
+_last_log_time = 0      # 上次写入时间戳
+_session_log_path = None  # 本次启动的日志文件路径
+
+def _init_session_log():
+    """每次启动创建新的会话日志文件"""
+    global _session_log_path
+    ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    _session_log_path = os.path.join(LOG_DIR, f"session-{ts}.txt")
+    with open(_session_log_path, "w", encoding="utf-8") as f:
+        f.write(f"═══ 会话开始 | {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} ═══\n\n")
+
+def _append_log(text: str):
+    """追加内容到当前会话日志"""
+    global _session_log_path
+    if not _session_log_path:
+        return
+    with open(_session_log_path, "a", encoding="utf-8") as f:
+        f.write(text + "\n")
 
 def write_diagnostic_log():
     global _diag_counter
     _diag_counter += 1
     now = time.time()
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    ts = time.strftime("%H:%M:%S", time.localtime(now))
     d = stats.to_dict()
-    mh = d.get("msgTypeHistory", [])
-    msg_names = []
-    for obj in mh:
-        mt = obj["t"] if isinstance(obj, dict) else obj
-        name = MSG_NAMES.get(mt, f"0x{mt:02X}")
-        msg_names.append(name)
+    elapsed = now - stats._start_time
 
-    lines = []
-    lines.append(f"═══ 诊断 #{_diag_counter} | {ts} | 运行 {now - stats._start_time:.0f}s ═══")
-    lines.append(f"")
-    lines.append(f"── 帧统计 ──")
-    lines.append(f"  总帧: {d['totalFrames']}  RREQ: {d['rreqCount']}  RREP: {d['rrepCount']}  DATA: {d['dataCount']}  ACK: {d['ackCount']}  坏帧: {d['badFrames']}")
-    lines.append(f"")
-    lines.append(f"── msgTypeHistory (共 {len(mh)} 条) ──")
-    lines.append(f"  全部: {msg_names}")
-    lines.append(f"  最近10: {msg_names[-10:] if len(msg_names) > 10 else msg_names}")
-    lines.append(f"")
-    lines.append(f"── 在线状态 ──")
-    lines.append(f"  在线节点: {d['onlineNodes']}/{d['totalNodes']}  IDs: {d.get('onlineNodeIds', [])}")
-    lines.append(f"  活跃链路: {d['activeLinks']}  链路: {d.get('activeLinkKeys', [])}")
-    lines.append(f"  当前阶段: {d.get('currentPhase', '?')}")
-    lines.append(f"")
-    lines.append(f"── 速率 ──")
-    lines.append(f"  上传: {d['upRate']} B/s  下载: {d['downRate']} B/s")
-    lines.append(f"  RSSI: {d.get('avgRssi', '?')}  成功率: {d.get('successRate', '?')}")
-    lines.append(f"")
-    lines.append(f"── 前端 msgGrid 预期 ──")
-    lines.append(f"  history 条数: {len(mh)}  应填格数: {len(mh)}  (每格 100ms)")
-    if len(mh) >= 40:
-        lines.append(f"  ⚠ 已满 40 条，前端应触发平移 + 继续填入新消息")
-    else:
-        lines.append(f"  尚需 {40 - len(mh)} 条填满 40 格")
-    lines.append(f"")
+    PHASE_CN = {
+        'idle':'⏸ 空闲','rreq':'🔍 路由发现','rrep':'📬 路由应答',
+        'data':'📦 数据传输','ack':'✅ 确认应答','ack_done':'✔ 通信完成',
+        'rreq_fail':'❌ 路由超时','rrep_fail':'❌ 应答超时',
+        'data_fail':'❌ 传输失败','ack_fail':'❌ 确认超时',
+    }
+    phase = d.get('currentPhase', 'idle')
+    phase_str = PHASE_CN.get(phase, phase)
 
-    log_path = os.path.join(LOG_DIR, "diag-log.txt")
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    lines = [f"═══ {ts} | {phase_str} | +{elapsed:.0f}s ═══"]
+
+    # ── 帧 ──
+    lines.append(f"  帧: 总{d['totalFrames']}  RREQ×{d['rreqCount']}  RREP×{d['rrepCount']}  DATA×{d['dataCount']}  ACK×{d['ackCount']}  坏×{d['badFrames']}")
+
+    # ── 成功率 ──
+    sr = d.get('successRate')
+    if sr is not None:
+        lines.append(f"  成功率: {sr}% ({d.get('cycleSuccesses',0)}/{d.get('cycleAttempts',0)})")
+
+    # ── 最近通信周期 ──
+    ch = d.get('cycleHistory', [])
+    if ch:
+        icons = ''.join(['✓' if c else '✗' for c in ch[-5:]])
+        lines.append(f"  最近周期: {icons}")
+
+    # ── 路由 ──
+    route = d.get('currentRoute')
+    if route and route.get('relays'):
+        path = ' → '.join([f"0x{r:02X}" for r in route['relays']])
+        lines.append(f"  路由: 0x30 → {path} → 0x10")
+    elif route is not None and not route.get('relays'):
+        lines.append(f"  路由: 0x30 → 0x10 (直达)")
+    # ★ mainTerm 路由决策（瓶颈+对比）
+    if stats._last_route_decision:
+        lines.append(f"  决策: {stats._last_route_decision}")
+
+    # ── 逐链路 RSSI ──
+    lr = d.get('linkRssi', {})
+    if lr:
+        parts = [f"{lk}={v}dBm" for lk, v in sorted(lr.items())]
+        lines.append(f"  RSSI: {'  '.join(parts)}")
+
+    # ── 在线/离线节点 ──
+    online_ids = set(d.get('onlineNodeIds', []))
+    # 所有已知节点
+    all_ids = {nid for nid in stats.node_stats if nid not in (0x00, 0xFF)}
+    all_ids.add(0x10)
+    offline_ids = all_ids - online_ids
+    online_str = ' '.join([f"0x{n:02X}" for n in sorted(online_ids)])
+    offline_str = ' '.join([f"0x{n:02X}" for n in sorted(offline_ids)]) if offline_ids else '无'
+    lines.append(f"  在线: {online_str}  |  离线: {offline_str}")
+
+    # ── 速率 ──
+    lines.append(f"  速率: ↑{d.get('upRate',0)} ↓{d.get('downRate',0)} B/s")
+
+    lines.append("")
+
+    _append_log("\n".join(lines))
 
 async def periodic_stats():
-    # ★ 记录启动时间戳（用于诊断）
+    global _last_log_frames, _last_log_time
     stats._start_time = time.time()
     while True:
         await asyncio.sleep(1)
         try: await manager.broadcast_stats()
         except Exception: pass
-        # ★ 每 5 秒写一次诊断日志
-        if int(time.time()) % 5 == 0:
+        # ★ 诊断日志：帧数变化时写入，最短间隔 2s，最长静默 30s 强制心跳
+        now = time.time()
+        frames = stats.total_frames
+        if (frames != _last_log_frames and now - _last_log_time >= 2) or (now - _last_log_time >= 30):
             try: write_diagnostic_log()
             except Exception: pass
+            _last_log_frames = frames
+            _last_log_time = now
         # ★ 广播待处理事件（如离线检测，兜底保障）
         for evt in stats.get_pending_events():
             try: await manager.broadcast(json.dumps(evt))
             except Exception: pass
+            # ★ 同步写入诊断日志
+            ts = time.strftime("%H:%M:%S")
+            etype = evt.get("type","")
+            if etype == "link_broken":
+                _append_log(f"🔗 {ts} | 链路断开 {evt.get('linkKey','?')} — {evt.get('msg','')}")
+            elif etype == "link_restored":
+                _append_log(f"🔗 {ts} | 链路恢复 {evt.get('linkKey','?')} — {evt.get('msg','')}")
+            elif etype == "node_offline":
+                _append_log(f"🔌 {ts} | 节点离线 {evt.get('nodeHex','?')}({evt.get('role','?')}) — {evt.get('msg','')}")
         # ★ 各阶段超时检测：卡在任何阶段过久均视作传输失败
         phase = stats.current_phase
         if phase in PHASE_TIMEOUTS:
@@ -937,9 +1048,14 @@ async def periodic_stats():
                 }))
                 stats.mark_cycle_failed(phase)  # 计入失败 + 保持告警状态
                 stats.phase_updated = time.time()
+                _append_log(f"⚠ {time.strftime('%H:%M:%S')} | {cn_name}({phase}) 阶段超时 → 传输失败")
+
+# ★ 静态文件挂载（JS/CSS 等），所有显式路由优先匹配
+app.mount("/", StaticFiles(directory=BASE_DIR), name="static")
 
 @app.on_event("startup")
 async def on_startup():
+    _init_session_log()
     asyncio.create_task(periodic_stats())
 
 if __name__ == "__main__":
